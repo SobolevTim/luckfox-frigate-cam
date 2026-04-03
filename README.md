@@ -44,9 +44,14 @@ HA Discovery — все сущности появляются в Home Assistant 
 ## Требования
 
 ### Оборудование
-- Luckfox Pico Ultra W (RV1106)
-- Камера MIS5001 или SC3336
-- Подключение по LAN
+- Основная тестовая платформа: **Luckfox Pico Max (RV1106)**
+- Дополнительная платформа: **Luckfox Pico Ultra W (RV1106)** с встроенным модулем Wi-Fi
+- Поддерживаемые сенсоры: camera MIS5001 или SC3336
+- Для централизованной работы: Ethernet LAN (Pico Ultra W также поддерживает Wi-Fi по 802.11ac)
+
+### Платы Luckfox Pico
+- `Luckfox Pico Max` — RV1106G3, 256MB DDR3L, SPI NAND FLASH(256MB), MIPI CSI 2-lane, DPI-interface RGB666, Ethernet 100M, USB 2.0 Host/Device, 26 GPIO pins.
+- `Luckfox Pico Ultra W` — RV1106G3, 256MB DDR3L, eMMC(8GB), MIPI CSI 2-lane, DPI-interface RGB666, 2.4GHz WiFi6, Bluetooth 5.2/BLE, USB 2.0 Host/Device, 33 GPIO pins.
 
 ### Аудио (🧪 экспериментально)
 - Встроенный микрофон доступен **только на Luckfox Pico Ultra**. На остальных платах (Pro, Max и т.д.) микрофон отсутствует.
