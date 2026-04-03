@@ -1,0 +1,14 @@
+build/
+install/
+*.o
+*.d
+.DS_Store
+
+# Sensitive deployment files — never commit real credentials
+run_camera.sh
+S99camera
+S40network
+S99failover
+S99static
+*.env
+secrets.*

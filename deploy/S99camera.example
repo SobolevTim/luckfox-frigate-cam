@@ -1,0 +1,128 @@
+#!/bin/sh
+# S99camera — init.d скрипт для автозапуска камеры
+#
+# Установка:
+#   scp S99camera root@<CAMERA_IP>:/etc/init.d/S99camera
+#   ssh root@<CAMERA_IP> chmod +x /etc/init.d/S99camera
+
+RUN_CAMERA_SH="/opt/camera_rtsp/run_camera.sh"
+BOOT_LOG="/tmp/camera_autostart.log"
+RUNTIME_DIR="/tmp/camera_rtsp"
+SUPERVISOR_PID_FILE="$RUNTIME_DIR/run_camera.pid"
+APP_PID_FILE="$RUNTIME_DIR/app.pid"
+
+log_boot() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] S99camera: $*" >> "$BOOT_LOG"
+}
+
+read_pid_file() {
+  if [ ! -f "$1" ]; then
+    return 1
+  fi
+  pid=$(cat "$1" 2>/dev/null)
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  echo "$pid"
+  return 0
+}
+
+is_pid_running() {
+  [ -n "$1" ] && kill -0 "$1" 2>/dev/null
+}
+
+wait_for_pid_exit() {
+  pid="$1"; timeout="$2"; elapsed=0
+  while is_pid_running "$pid"; do
+    [ "$elapsed" -ge "$timeout" ] && return 1
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 0
+}
+
+stop_pid() {
+  pid="$1"; label="$2"
+  [ -z "$pid" ] && return 0
+  is_pid_running "$pid" || return 0
+  log_boot "stopping $label pid=$pid"
+  kill "$pid" 2>/dev/null || true
+  if ! wait_for_pid_exit "$pid" 10; then
+    log_boot "$label pid=$pid did not stop, sending SIGKILL"
+    kill -9 "$pid" 2>/dev/null || true
+    wait_for_pid_exit "$pid" 5 || true
+  fi
+}
+
+status_line() {
+  supervisor_pid=$(read_pid_file "$SUPERVISOR_PID_FILE" 2>/dev/null || true)
+  app_pid=$(read_pid_file "$APP_PID_FILE" 2>/dev/null || true)
+
+  if [ -n "$supervisor_pid" ] && is_pid_running "$supervisor_pid"; then
+    if [ -n "$app_pid" ] && is_pid_running "$app_pid"; then
+      echo "luckfox_camera_rtsp is running (supervisor $supervisor_pid, app $app_pid)"
+    else
+      echo "luckfox_camera_rtsp supervisor running (pid $supervisor_pid), app restarting"
+    fi
+    return 0
+  fi
+
+  if [ -n "$app_pid" ] && is_pid_running "$app_pid"; then
+    echo "luckfox_camera_rtsp app running without supervisor (pid $app_pid)"
+    return 0
+  fi
+
+  echo "luckfox_camera_rtsp is NOT running"
+  return 1
+}
+
+case "$1" in
+  start)
+    log_boot "start requested"
+    if [ ! -x "$RUN_CAMERA_SH" ]; then
+      log_boot "missing or not executable: $RUN_CAMERA_SH"
+      echo "luckfox_camera_rtsp start failed: $RUN_CAMERA_SH not found"
+      exit 1
+    fi
+
+    supervisor_pid=$(read_pid_file "$SUPERVISOR_PID_FILE" 2>/dev/null || true)
+    if [ -n "$supervisor_pid" ] && is_pid_running "$supervisor_pid"; then
+      echo "luckfox_camera_rtsp already running (supervisor $supervisor_pid)"
+      exit 0
+    fi
+
+    mkdir -p "$RUNTIME_DIR" || exit 1
+    "$RUN_CAMERA_SH" >> "$BOOT_LOG" 2>&1 &
+    echo "luckfox_camera_rtsp start scheduled"
+    ;;
+  stop)
+    log_boot "stop requested"
+    supervisor_pid=$(read_pid_file "$SUPERVISOR_PID_FILE" 2>/dev/null || true)
+    app_pid=$(read_pid_file "$APP_PID_FILE" 2>/dev/null || true)
+
+    if [ -z "$supervisor_pid" ] && [ -z "$app_pid" ]; then
+      echo "luckfox_camera_rtsp is NOT running"
+      exit 0
+    fi
+
+    stop_pid "$supervisor_pid" "supervisor"
+    stop_pid "$app_pid" "camera app"
+    rm -f "$SUPERVISOR_PID_FILE" "$APP_PID_FILE"
+    echo "luckfox_camera_rtsp stopped"
+    ;;
+  restart)
+    $0 stop
+    sleep 2
+    $0 start
+    ;;
+  status)
+    status_line
+    exit $?
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+
+exit 0

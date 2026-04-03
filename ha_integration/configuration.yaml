@@ -1,0 +1,66 @@
+# ============================================================
+# Home Assistant — интеграция с камерой Luckfox RTSP (MQTT)
+# ============================================================
+#
+# Камера создаёт все сущности автоматически через MQTT Discovery.
+# Ручная конфигурация в configuration.yaml НЕ требуется для:
+#   - слайдеров яркости / контраста / насыщенности / резкости
+#   - переключателей зеркало / поворот / антимигание / ночной режим
+#   - селекторов баланса белого / daynight / anti_flicker_mode
+#   - сенсоров телеметрии (CPU, RAM, температура, FPS, битрейт, uptime)
+#
+# Всё перечисленное появляется в HA автоматически.
+#
+# Ниже — только то, что НЕ может быть создано через Discovery:
+#   1. Камера (RTSP-поток) — добавляется вручную или через интеграцию.
+#   2. Примеры автоматизаций.
+# ============================================================
+
+# ─── RTSP-камера ──────────────────────────────────────────────────────────────
+# Вариант 1: через интеграцию «Generic Camera» (рекомендуется)
+#   Настройки → Устройства → Добавить интеграцию → Generic Camera
+#   Stream URL: rtsp://<CAMERA_IP>:554/live/0
+#
+# Вариант 2: через configuration.yaml
+camera:
+  - platform: generic
+    name: Luckfox Camera
+    stream_source: "rtsp://<CAMERA_IP>:554/live/0"
+    still_image_url: ""   # камера не отдаёт JPEG-снимки
+
+# ─── Примеры автоматизаций ───────────────────────────────────────────────────
+
+# Автоматический ночной режим по закату/рассвету
+# (night_mode управляет ISP-профилем: AE, NR, DRC, FPS, битрейт)
+automation:
+  - alias: "Камера — ночной режим по закату"
+    trigger:
+      - platform: sun
+        event: sunset
+        offset: "-00:30:00"
+    action:
+      - service: switch.turn_on
+        target:
+          entity_id: switch.luckfox_camera_night_mode
+
+  - alias: "Камера — дневной режим по рассвету"
+    trigger:
+      - platform: sun
+        event: sunrise
+        offset: "00:30:00"
+    action:
+      - service: switch.turn_off
+        target:
+          entity_id: switch.luckfox_camera_night_mode
+
+  # Уведомление при перегреве SoC
+  - alias: "Камера — перегрев SoC"
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.luckfox_camera_soc_temp
+        above: 75
+    action:
+      - service: notify.notify
+        data:
+          title: "⚠️ Luckfox Camera"
+          message: "Температура SoC: {{ states('sensor.luckfox_camera_soc_temp') }}°C"

@@ -1,0 +1,583 @@
+#!/bin/sh
+# run_camera.sh — запускается из S99camera в фоне
+# Деплой: scp run_camera.sh root@<CAMERA_IP>:/opt/camera_rtsp/run_camera.sh
+#          ssh root@<CAMERA_IP> chmod +x /opt/camera_rtsp/run_camera.sh
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin:/oem/usr/bin
+
+BASE_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+APP="$BASE_DIR/bin/luckfox_camera_rtsp"
+LIB_DIR="$BASE_DIR/lib"
+BOOT_LOG=/tmp/camera_autostart.log
+APP_LOG=/tmp/camera_rtsp.log
+RUNTIME_DIR=/tmp/camera_rtsp
+LOCK_DIR="$RUNTIME_DIR/watchdog.lock"
+LOCK_OWNER_FILE="$LOCK_DIR/pid"
+SUPERVISOR_PID_FILE="$RUNTIME_DIR/run_camera.pid"
+APP_PID_FILE="$RUNTIME_DIR/app.pid"
+APP_FIFO="$RUNTIME_DIR/app.log.fifo"
+APP_LOG_TMP="$RUNTIME_DIR/app.log.tmp"
+HEARTBEAT_FILE="$RUNTIME_DIR/heartbeat"
+
+# ─── MQTT параметры ──────────────────────────────────────────────────
+# ВАЖНО: замените значения на свои перед деплоем!
+MQTT_HOST="<BROKER_IP>"
+MQTT_PORT="1883"
+MQTT_USER="<mqtt_user>"
+MQTT_PASS="<mqtt_password>"
+
+# Уникальный ID устройства в MQTT/HA (топики discovery/state).
+# ВАЖНО: на каждой камере должен быть разный ID.
+# Примеры: luckfox_camera_pro_front / luckfox_camera_pro_back
+MQTT_ID="luckfox_camera"
+
+# Отображаемое имя устройства в Home Assistant.
+# Пример: Pico Ultra Pro Front Door
+MQTT_NAME="Luckfox Camera"
+# ─────────────────────────────────────────────────────────────────────
+
+# Стартовая задержка watchdog после запуска из init.
+# Нужна только для очень раннего boot, поэтому держим минимальной.
+STARTUP_DELAY=3
+
+# Сколько ждать завершения stock rkipc после stop/killall.
+RKIPC_STOP_TIMEOUT=5
+
+# Максимальный размер лога (байт). При превышении — усекается до нуля.
+LOG_MAX_BYTES=5242880   # 5 MB
+LOG_KEEP_BYTES=1048576  # сохраняем последний 1 MB после trim
+LOG_TRIM_INTERVAL=500   # вызывать trim лога только раз в N записанных строк
+
+# Задержка между автоматическими перезапусками (вотчдог)
+WATCHDOG_MIN_DELAY=10   # секунд, минимум
+WATCHDOG_MAX_DELAY=120  # секунд, максимум
+WATCHDOG_RESET_AFTER=300 # секунд непрерывной работы до сброса backoff
+HEARTBEAT_TIMEOUT=45      # если heartbeat старше этого порога — считаем hang
+HEARTBEAT_STARTUP_GRACE=90 # grace-период после старта приложения
+HEARTBEAT_POLL_INTERVAL=2 # период проверки heartbeat
+HANG_CONFIRM_POLLS=3      # сколько подряд stale-проверок нужно для hang
+HANG_RESTART_THRESHOLD=3  # после N hang подряд включаем максимальный backoff
+
+# Уровень логов Rockit/MPP: 0..6 (меньше = тише). 3 = WARN.
+RT_LOG_LEVEL=3
+
+LOGGER_PID=
+APP_RUNNING=0
+HANG_STREAK=0
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] run_camera: $*" >> "$BOOT_LOG"
+}
+
+ensure_runtime_dir() {
+    [ -d "$RUNTIME_DIR" ] || mkdir -p "$RUNTIME_DIR" || return 1
+}
+
+read_pid_file() {
+    if [ ! -f "$1" ]; then
+        return 1
+    fi
+
+    pid=$(cat "$1" 2>/dev/null)
+    case "$pid" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    echo "$pid"
+    return 0
+}
+
+is_pid_running() {
+    [ -n "$1" ] && kill -0 "$1" 2>/dev/null
+}
+
+write_pid_file() {
+    echo "$2" > "$1"
+}
+
+remove_pid_file_if_matches() {
+    pid=$(read_pid_file "$1" 2>/dev/null || true)
+    if [ -n "$pid" ] && [ "$pid" = "$2" ]; then
+        rm -f "$1"
+    fi
+}
+
+trim_app_log() {
+    if [ ! -f "$APP_LOG" ]; then
+        return
+    fi
+
+    size=$(wc -c < "$APP_LOG" 2>/dev/null || echo 0)
+    if [ "$size" -le "$LOG_MAX_BYTES" ]; then
+        return
+    fi
+
+    if tail -c "$LOG_KEEP_BYTES" "$APP_LOG" > "$APP_LOG_TMP" 2>/dev/null; then
+        mv "$APP_LOG_TMP" "$APP_LOG"
+        log "app log trimmed from ${size} bytes to last ${LOG_KEEP_BYTES} bytes"
+    else
+        rm -f "$APP_LOG_TMP"
+        log "app log exceeded ${LOG_MAX_BYTES} bytes (${size}), truncating"
+        : > "$APP_LOG"
+    fi
+}
+
+# Read heartbeat file content (monotonic timestamp written by the app).
+# Returns the content string, or empty if the file doesn't exist / is empty.
+read_heartbeat_value() {
+    if [ ! -f "$1" ]; then
+        echo ""
+        return
+    fi
+    cat "$1" 2>/dev/null
+}
+
+monitor_app_health() {
+    pid="$1"
+    start_ts=$(date +%s)
+    last_hb_value=""
+    last_hb_change_ts=$(date +%s)
+    stale_polls=0
+
+    while is_pid_running "$pid"; do
+        now=$(date +%s)
+
+        # Read heartbeat file content (app writes a monotonically increasing
+        # CLOCK_MONOTONIC timestamp).  We only check whether the value CHANGES
+        # between polls — no dependency on stat/mtime.
+        hb_value=$(read_heartbeat_value "$HEARTBEAT_FILE")
+
+        if [ -n "$hb_value" ] && [ "$hb_value" != "$last_hb_value" ]; then
+            last_hb_value="$hb_value"
+            last_hb_change_ts="$now"
+            stale_polls=0
+        fi
+
+        app_age=$((now - start_ts))
+        if [ "$app_age" -lt "$HEARTBEAT_STARTUP_GRACE" ]; then
+            sleep "$HEARTBEAT_POLL_INTERVAL"
+            continue
+        fi
+
+        stale=$((now - last_hb_change_ts))
+        if [ "$stale" -ge "$HEARTBEAT_TIMEOUT" ]; then
+            stale_polls=$((stale_polls + 1))
+            if [ "$stale_polls" -ge "$HANG_CONFIRM_POLLS" ]; then
+                log "heartbeat stale for ${stale}s (pid=$pid, polls=$stale_polls)"
+                return 1
+            fi
+            log "heartbeat stale candidate ${stale}s (pid=$pid, polls=$stale_polls/$HANG_CONFIRM_POLLS)"
+        else
+            stale_polls=0
+        fi
+
+        sleep "$HEARTBEAT_POLL_INTERVAL"
+    done
+
+    return 0
+}
+
+log_writer() {
+    skip_rtsp_debug_block=0
+    log_lines_since_trim=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$skip_rtsp_debug_block" -eq 1 ]; then
+            [ -z "$line" ] && skip_rtsp_debug_block=0
+            continue
+        fi
+
+        case "$line" in
+            "[DEBUG "*)
+                case "$line" in
+                    *"rtsp_msg_parse_from_array"*|*"rtsp_msg_build_to_array"*)
+                        skip_rtsp_debug_block=1
+                        ;;
+                esac
+                continue
+                ;;
+            DEBUG)
+                continue
+                ;;
+        esac
+
+        printf '%s\n' "$line" >> "$APP_LOG"
+        log_lines_since_trim=$((log_lines_since_trim + 1))
+        if [ "$log_lines_since_trim" -ge "$LOG_TRIM_INTERVAL" ]; then
+            trim_app_log
+            log_lines_since_trim=0
+        fi
+    done < "$APP_FIFO"
+    trim_app_log  # финальная очистка после выхода приложения
+}
+
+wait_for_pid_exit() {
+    pid="$1"
+    timeout="$2"
+    elapsed=0
+
+    while is_pid_running "$pid"; do
+        if [ "$elapsed" -ge "$timeout" ]; then
+            return 1
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    return 0
+}
+
+is_process_named_running() {
+    name="$1"
+
+    if command -v pidof >/dev/null 2>&1; then
+        pidof "$name" >/dev/null 2>&1
+        return $?
+    fi
+
+    ps 2>/dev/null | grep "[${name%${name#?}}]${name#?}" >/dev/null 2>&1
+}
+
+wait_for_process_name_exit() {
+    name="$1"
+    timeout="$2"
+    elapsed=0
+
+    while is_process_named_running "$name"; do
+        if [ "$elapsed" -ge "$timeout" ]; then
+            return 1
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    return 0
+}
+
+stop_pid_gracefully() {
+    pid="$1"
+    label="$2"
+
+    if ! is_pid_running "$pid"; then
+        return 0
+    fi
+
+    log "stopping ${label} pid=$pid"
+    kill "$pid" 2>/dev/null || true
+    if ! wait_for_pid_exit "$pid" 10; then
+        log "${label} pid=$pid did not stop after SIGTERM, sending SIGKILL"
+        kill -9 "$pid" 2>/dev/null || true
+        wait_for_pid_exit "$pid" 5 || true
+    fi
+}
+
+cleanup_runtime() {
+    if [ "$APP_RUNNING" -eq 1 ]; then
+        app_pid=$(read_pid_file "$APP_PID_FILE" 2>/dev/null || true)
+        if [ -n "$app_pid" ]; then
+            stop_pid_gracefully "$app_pid" "camera app"
+            remove_pid_file_if_matches "$APP_PID_FILE" "$app_pid"
+        fi
+        APP_RUNNING=0
+    fi
+
+    if [ -n "$LOGGER_PID" ] && is_pid_running "$LOGGER_PID"; then
+        kill "$LOGGER_PID" 2>/dev/null || true
+        wait "$LOGGER_PID" 2>/dev/null || true
+    fi
+    LOGGER_PID=
+
+    rm -f "$APP_FIFO" "$APP_LOG_TMP" "$HEARTBEAT_FILE"
+    remove_pid_file_if_matches "$SUPERVISOR_PID_FILE" "$$"
+
+    owner_pid=$(read_pid_file "$LOCK_OWNER_FILE" 2>/dev/null || true)
+    if [ -n "$owner_pid" ] && [ "$owner_pid" = "$$" ]; then
+        rm -f "$LOCK_OWNER_FILE"
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
+}
+
+on_signal() {
+    log "signal received, stopping supervisor"
+    cleanup_runtime
+    exit 0
+}
+
+acquire_lock() {
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        write_pid_file "$LOCK_OWNER_FILE" "$$"
+        return 0
+    fi
+
+    owner_pid=$(read_pid_file "$LOCK_OWNER_FILE" 2>/dev/null || true)
+    if [ -n "$owner_pid" ] && is_pid_running "$owner_pid"; then
+        log "another watchdog instance is already running pid=$owner_pid"
+        return 1
+    fi
+
+    rm -f "$LOCK_OWNER_FILE"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        write_pid_file "$LOCK_OWNER_FILE" "$$"
+        log "recovered stale watchdog lock"
+        return 0
+    fi
+
+    log "failed to acquire watchdog lock"
+    return 1
+}
+
+find_rklunch_stop() {
+    for candidate in \
+        "$(command -v RkLunch-stop.sh 2>/dev/null)" \
+        /oem/usr/bin/RkLunch-stop.sh \
+        /usr/bin/RkLunch-stop.sh \
+        /bin/RkLunch-stop.sh
+    do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+trap 'cleanup_runtime' EXIT
+trap 'on_signal' INT TERM HUP
+
+if ! ensure_runtime_dir; then
+    log "failed to create runtime directory: $RUNTIME_DIR"
+    exit 1
+fi
+
+if ! acquire_lock; then
+    exit 0
+fi
+
+write_pid_file "$SUPERVISOR_PID_FILE" "$$"
+
+if [ "$STARTUP_DELAY" -gt 0 ] 2>/dev/null; then
+    sleep "$STARTUP_DELAY"
+fi
+log "startup delay finished (${STARTUP_DELAY}s)"
+
+RKLUNCH_STOP=$(find_rklunch_stop)
+if [ -n "$RKLUNCH_STOP" ]; then
+    log "stopping stock camera service via $RKLUNCH_STOP"
+    "$RKLUNCH_STOP" >> "$BOOT_LOG" 2>&1
+else
+    log "RkLunch-stop.sh not found in PATH=$PATH"
+fi
+
+# Убить сам watchdog-скрипт RkLunch, чтобы он не перезапускал rkipc каждые ~60с.
+# Именно перезапуск rkipc инвалидирует MPP-каналы нашего процесса,
+# что приводит к "ctx not found" / "RKSockServer accept failed" / SIGTERM.
+pkill -f RkLunch 2>/dev/null || true
+log "pkill RkLunch issued"
+
+killall rkipc 2>/dev/null
+log "killall rkipc issued"
+if wait_for_process_name_exit "rkipc" "$RKIPC_STOP_TIMEOUT"; then
+    log "rkipc is stopped"
+else
+    log "rkipc still visible after ${RKIPC_STOP_TIMEOUT}s; continuing with fallback logic"
+fi
+
+if [ ! -x "$APP" ]; then
+    log "camera binary is missing or not executable: $APP"
+    exit 1
+fi
+
+if [ ! -d "$LIB_DIR" ]; then
+    log "library directory is missing: $LIB_DIR"
+    exit 1
+fi
+
+export LD_LIBRARY_PATH="$LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+log "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+
+export rt_log_level="$RT_LOG_LEVEL"
+export LUCKFOX_SKIP_RKLUNCH_STOP=1
+echo "all=$RT_LOG_LEVEL" > /tmp/rt_log_level 2>/dev/null || true
+log "rt_log_level configured to $RT_LOG_LEVEL"
+
+cd "$BASE_DIR" || exit 1
+
+trim_app_log
+log "app log ready"
+
+log "starting watchdog loop"
+# Функция: сброс MPP kernel-модуля.
+#
+# На RV1106 при завершении процесса kernel не сразу освобождает MPP-каналы
+# (~90-96s таймаут). Новый инстанс rockit видит "chan_id 0 is already valid",
+# затем "RKSockServer accept failed", и посылает SIGTERM сам себе.
+#
+# Стратегия:
+#   1. Ищем модуль в /proc/modules и делаем rmmod+insmod.
+#   2. Если rmmod недоступен или возвращает ошибку — ждём 100s (kernel timeout ~96s).
+#
+# Примечание: первый старт тоже требует сброса, т.к. rkipc занимал каналы.
+reset_mpp_module() {
+    local iteration="$1"
+
+    log "attempting MPP kernel module reset"
+
+    # Даём предыдущему процессу время закрыть все fd(/dev/mpp_service и т.п.)
+    sleep 2
+
+    # На первой итерации rkipc только что убит (~7с назад) — ядро гарантированно
+    # ещё держит MPP-каналы (~90-96s таймаут). rmmod всегда провалится, поэтому
+    # сразу ждём kernel timeout, не делая заведомо безуспешную попытку.
+    if [ "$iteration" -le 1 ]; then
+        log "first iteration: waiting 100s for kernel to release MPP resources from rkipc"
+        sleep 100
+        return 0
+    fi
+
+    # Ищем имя модуля в /proc/modules (кандидаты для RV1106 / RK356x).
+    local mpp_mod=""
+    for candidate in vcodec rk_vcodec mpp_vcodec rkvdec rkvenc video_dec; do
+        if grep -q "^${candidate} " /proc/modules 2>/dev/null; then
+            mpp_mod="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$mpp_mod" ]; then
+        log "MPP module not found in /proc/modules (built-in?); waiting 100s for kernel timeout"
+        sleep 100
+        return 0
+    fi
+
+    if rmmod "$mpp_mod" 2>/dev/null; then
+        sleep 1
+        if modprobe "$mpp_mod" 2>/dev/null \
+           || insmod /lib/modules/"${mpp_mod}.ko" 2>/dev/null \
+           || insmod /lib/modules/*/${mpp_mod}.ko 2>/dev/null; then
+            log "MPP module $mpp_mod reloaded successfully"
+        else
+            log "WARNING: $mpp_mod insmod failed after rmmod; continuing anyway"
+        fi
+        sleep 1
+    else
+        log "rmmod $mpp_mod failed (busy or unsupported); waiting 100s for kernel timeout"
+        sleep 100
+    fi
+}
+
+# Счётчик итераций watchdog-цикла (нужен для reset_mpp_module).
+loop_iteration=0
+watchdog_delay=$WATCHDOG_MIN_DELAY
+
+while true; do
+    loop_iteration=$((loop_iteration + 1))
+    rm -f "$APP_FIFO"
+    rm -f "$HEARTBEAT_FILE"
+    if ! mkfifo "$APP_FIFO"; then
+        log "failed to create log fifo: $APP_FIFO"
+        cleanup_runtime
+        exit 1
+    fi
+
+    log_writer &
+    LOGGER_PID=$!
+
+    # Убить rkipc, если он перезапустился пока мы ждали рестарта.
+    # Это необходимо на каждой итерации — иначе rkipc захватывает MPP-каналы
+    # и вызывает "RKSockServer accept failed" внутри rockit.
+    pkill -f RkLunch 2>/dev/null || true
+    killall rkipc 2>/dev/null || true
+    # Очистить UNIX-сокет rockit IPCSERVER; иначе новый инстанс может получить
+    # "accept failed" если файл остался от аварийного завершения.
+    rm -f /tmp/UNIX.domain0 2>/dev/null || true
+
+    # Сбросить MPP kernel-модуль чтобы освободить каналы от предыдущего сеанса.
+    # Без этого rockit видит "chan_id 0 is already valid" и через ~90s убивает себя.
+    # На первой итерации (loop_iteration=1) сброс не нужен — предыдущего сеанса нет.
+    reset_mpp_module "$loop_iteration"
+
+    log "starting camera app (MQTT parameters)"
+    "$APP" \
+        --mqtt-host "$MQTT_HOST" \
+        --mqtt-port "$MQTT_PORT" \
+        --mqtt-user "$MQTT_USER" \
+        --mqtt-pass "$MQTT_PASS" \
+        --mqtt-id "$MQTT_ID" \
+        --mqtt-name "$MQTT_NAME" \
+        > "$APP_FIFO" 2>&1 &
+
+    app_pid=$!
+    APP_RUNNING=1
+    write_pid_file "$APP_PID_FILE" "$app_pid"
+
+    start_ts=$(date +%s)
+
+    app_killed_by_watchdog=0
+    if ! monitor_app_health "$app_pid"; then
+        app_killed_by_watchdog=1
+        log "hang watchdog: attempting to stop app pid=$app_pid"
+        stop_pid_gracefully "$app_pid" "camera app (hang watchdog)"
+    fi
+
+    wait "$app_pid"
+
+    exit_code=$?
+    APP_RUNNING=0
+    remove_pid_file_if_matches "$APP_PID_FILE" "$app_pid"
+
+    wait "$LOGGER_PID" 2>/dev/null || true
+    LOGGER_PID=
+    rm -f "$APP_FIFO"
+
+    end_ts=$(date +%s)
+    runtime_s=$((end_ts - start_ts))
+    if [ "$runtime_s" -lt 0 ]; then
+        runtime_s=0
+    fi
+
+    log "camera app exited with code $exit_code"
+    log "camera app runtime ${runtime_s}s"
+
+    if [ "$exit_code" -ge 128 ]; then
+        log "camera app terminated by signal $((exit_code - 128))"
+    fi
+
+    if [ "$app_killed_by_watchdog" -eq 1 ]; then
+        HANG_STREAK=$((HANG_STREAK + 1))
+        log "hang watchdog triggered (streak=$HANG_STREAK)"
+    else
+        HANG_STREAK=0
+    fi
+
+    if [ "$HANG_STREAK" -ge "$HANG_RESTART_THRESHOLD" ]; then
+        watchdog_delay=$WATCHDOG_MAX_DELAY
+        log "hang streak threshold reached (streak=$HANG_STREAK); reboot disabled, using max restart delay ${watchdog_delay}s"
+    fi
+
+    if [ "$runtime_s" -ge "$WATCHDOG_RESET_AFTER" ]; then
+        watchdog_delay=$WATCHDOG_MIN_DELAY
+        HANG_STREAK=0
+        log "runtime ${runtime_s}s reached reset threshold, backoff reset to ${watchdog_delay}s and hang streak cleared"
+    fi
+
+    # Если приложение завершилось само (не убито watchdog) и проработало >= 30 с,
+    # считаем это одиночным падением (напр. rockit SIGTERM) — сброс задержки.
+    # Экспоненциальный штраф применяется только к зависаниям.
+    if [ "$app_killed_by_watchdog" -eq 0 ] && [ "$runtime_s" -ge 30 ]; then
+        watchdog_delay=$WATCHDOG_MIN_DELAY
+        log "app self-exited after ${runtime_s}s (not a hang); backoff reset to ${watchdog_delay}s"
+    fi
+
+    # Для высокой доступности перезапускаем приложение на ЛЮБОМ его выходе.
+    # Намеренный stop сервиса обрабатывается сигналом самому watchdog (trap on_signal).
+
+    log "unexpected exit — restarting in ${watchdog_delay}s"
+    sleep "$watchdog_delay"
+
+    # Экспоненциальная задержка с ограничением максимума
+    watchdog_delay=$(( watchdog_delay * 2 ))
+    [ "$watchdog_delay" -gt "$WATCHDOG_MAX_DELAY" ] && watchdog_delay=$WATCHDOG_MAX_DELAY
+done

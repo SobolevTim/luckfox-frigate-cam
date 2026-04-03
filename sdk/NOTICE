@@ -1,0 +1,29 @@
+Rockchip SDK Components
+========================
+
+This directory contains headers and prebuilt libraries from the Rockchip
+MPI SDK, redistributed from the official Luckfox repository:
+  https://github.com/LuckfoxTECH/luckfox_pico_rkmpi_example
+
+License information per component:
+
+  MPI headers (rk_mpi_*.h, rk_comm_*.h, rk_common.h, rk_debug.h, etc.)
+    Copyright (c) 2021 Fuzhou Rockchip Electronics Co., Ltd
+    Dual-licensed: GPL-2.0 WITH Linux-syscall-note OR Apache-2.0
+    This project uses them under the Apache-2.0 option.
+
+  sample_comm.h
+    Copyright (c) 2022 Rockchip Electronics Co. LTD
+    Apache License 2.0
+
+  librga (im2d.h, rga.h, etc.)
+    Copyright (c) 2020 Rockchip Electronics Co., Ltd.
+    Apache License 2.0
+
+  rtsp_demo.h
+    Copyright (c) 2020-2022 Rockchip Electronics Co., Ltd.
+    BSD-style license
+
+  Prebuilt binary libraries (.a, .so)
+    Provided by Rockchip / LuckfoxTECH without explicit license file.
+    Redistributed as-is from the official public GitHub repository.

@@ -1,0 +1,4 @@
+# Track prebuilt SDK binaries with Git LFS
+sdk/lib/**/*.a filter=lfs diff=lfs merge=lfs -text
+sdk/lib/**/*.so filter=lfs diff=lfs merge=lfs -text
+sdk/lib/**/*.so.* filter=lfs diff=lfs merge=lfs -text
