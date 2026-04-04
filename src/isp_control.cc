@@ -18,6 +18,7 @@ static rk_aiq_sys_ctx_t *g_ctx    = NULL;
 static camera_settings_t g_cfg;
 static pthread_mutex_t   g_lock   = PTHREAD_MUTEX_INITIALIZER;
 static const char       *DEFAULT_SETTINGS_FILE = ISP_SETTINGS_FILE;
+static int               g_sensor_flip_supported = 0;
 
 typedef struct {
     int valid;
@@ -38,6 +39,7 @@ typedef struct {
 static day_hw_profile_t g_day_hw;
 
 rk_aiq_sys_ctx_t *isp_get_ctx(void) { return g_ctx; }
+int isp_sensor_supports_flip(void) { return g_sensor_flip_supported; }
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 static unsigned int clamp_u32(unsigned int value,
@@ -243,6 +245,39 @@ int isp_init(int cam_id, const char *iq_dir, int width, int height) {
         return -1;
     }
 
+    /* Ensure AE and AWB are in AUTO mode after start.
+     * Without this, some sensors (e.g. SC3336) may boot with the ISP 3A engine
+     * in an indeterminate state, causing overexposure or wrong white balance. */
+    {
+        XCamReturn ae_rc = rk_aiq_uapi2_setExpMode(g_ctx, OP_AUTO);
+        printf("[ISP] force AE → AUTO: %s\n",
+               ae_rc == XCAM_RETURN_NO_ERROR ? "ok" : "FAILED");
+
+        XCamReturn wb_rc = rk_aiq_uapi2_setWBMode(g_ctx, OP_AUTO);
+        printf("[ISP] force AWB → AUTO: %s\n",
+               wb_rc == XCAM_RETURN_NO_ERROR ? "ok" : "FAILED");
+    }
+
+    /* Probe sensor mirror/flip support.
+     * SC3336 exposes V4L2_CID_HFLIP/VFLIP, MIS5001 does not.
+     * We try a no-op setMirrorFlip(0,0) to detect support. */
+    {
+        XCamReturn mf_rc = rk_aiq_uapi2_setMirrorFlip(g_ctx, false, false, 0);
+        g_sensor_flip_supported = (mf_rc == XCAM_RETURN_NO_ERROR) ? 1 : 0;
+        printf("[ISP] sensor mirror/flip support: %s (probe rc=%d)\n",
+               g_sensor_flip_supported ? "YES (ISP API)" : "NO (RGA fallback)",
+               mf_rc);
+    }
+
+    /* Diagnostic: verify AE mode is active */
+    {
+        opMode_t cur_ae = OP_MANUAL;
+        if (rk_aiq_uapi2_getExpMode(g_ctx, &cur_ae) == XCAM_RETURN_NO_ERROR)
+            printf("[ISP] AE mode verify: %s\n", cur_ae == OP_AUTO ? "AUTO" : "MANUAL");
+        else
+            printf("[ISP] AE mode verify: query failed\n");
+    }
+
     /* Apply settings (saved or default) */
     isp_apply_settings(&g_cfg);
 
@@ -256,6 +291,7 @@ void isp_stop(void) {
         rk_aiq_uapi2_sysctl_stop(g_ctx, false);
         rk_aiq_uapi2_sysctl_deinit(g_ctx);
         g_ctx = NULL;
+        g_sensor_flip_supported = 0;
         memset(&g_day_hw, 0, sizeof(g_day_hw));
         printf("[ISP] stopped\n");
     }
@@ -380,20 +416,35 @@ int isp_set_wb_preset(wb_preset_t preset) {
 int isp_set_mirror_flip(int mirror, int flip) {
     mirror = mirror ? 1 : 0;
     flip   = flip ? 1 : 0;
+
     /*
-     * NOTE: rk_aiq_uapi2_setMirrorFlip() is NOT called here.
-     * On RV1106 + MIS5001 the sensor driver does not expose V4L2_CID_VFLIP /
-     * V4L2_CID_HFLIP, so the rkaiq API silently has no effect.
-     * Mirror/flip is instead applied by the RGA transform in the capture loop
-     * (rga_copy_nv12_transform in camera_mpi.cc), which covers both main and
-     * sub streams in a single zero-CPU hardware pass.
+     * Try sensor-level mirror/flip first (via rkaiq → V4L2).
+     * SC3336 supports V4L2_CID_HFLIP / V4L2_CID_VFLIP, MIS5001 does not.
+     * When the sensor handles it, the VI output is already flipped and the
+     * RGA capture loop must NOT apply a second transform (skip_frm_cnt=4
+     * tells the ISP to skip 4 frames while the sensor reconfigures).
+     * If the ISP API fails, we fall back to RGA transform in the main loop.
      */
+    if (g_ctx && g_sensor_flip_supported) {
+        XCamReturn rc = rk_aiq_uapi2_setMirrorFlip(g_ctx,
+                                                    (bool)mirror, (bool)flip, 4);
+        if (rc == XCAM_RETURN_NO_ERROR) {
+            printf("[ISP] mirror=%d flip=%d applied via sensor (ISP API)\n",
+                   mirror, flip);
+        } else {
+            printf("[ISP] setMirrorFlip(%d,%d) ISP err=%d, falling back to RGA\n",
+                   mirror, flip, rc);
+            g_sensor_flip_supported = 0; /* downgrade: stop trying ISP path */
+        }
+    } else {
+        printf("[ISP] mirror=%d flip=%d (will be applied via RGA)\n",
+               mirror, flip);
+    }
+
     pthread_mutex_lock(&g_lock);
     g_cfg.mirror = mirror;
     g_cfg.flip   = flip;
     pthread_mutex_unlock(&g_lock);
-    printf("[ISP] mirror=%d flip=%d (will be applied via RGA on next frame)\n",
-           mirror, flip);
     return 0;
 }
 

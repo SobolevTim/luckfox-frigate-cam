@@ -453,13 +453,25 @@ int main(int argc, char *argv[]) {
         /* 8.2 DMA copy NV12 data to our buffer via RGA (zero CPU load).
          * On Cortex-A7 @ 1.2 GHz the CPU memcpy of a 2592x1944 NV12 frame
          * (~7.6 MB) takes ~11 ms — 27% of the 40 ms frame budget at 25 fps.
-         * RGA DMA copy frees the CPU entirely during the transfer. */
+         * RGA DMA copy frees the CPU entirely during the transfer.
+         *
+         * If the sensor handles mirror/flip natively (SC3336), we skip the
+         * RGA transform and do a plain DMA copy instead. */
         void *vi_vaddr = RK_MPI_MB_Handle2VirAddr(vi_frame.stVFrame.pMbBlk);
-        if (rga_copy_nv12_transform(vi_vaddr, mb_vaddr,
-                                    STREAM_WIDTH, STREAM_HEIGHT,
-                                    cached_mirror, cached_flip) != 0) {
-            /* Fallback to CPU copy if RGA fails */
-            memcpy(mb_vaddr, vi_vaddr, (size_t)(STREAM_WIDTH * STREAM_HEIGHT * 3 / 2));
+        {
+            int rga_mirror = cached_mirror;
+            int rga_flip   = cached_flip;
+            if (isp_sensor_supports_flip()) {
+                /* Sensor already applied flip/mirror — don't double-flip */
+                rga_mirror = 0;
+                rga_flip   = 0;
+            }
+            if (rga_copy_nv12_transform(vi_vaddr, mb_vaddr,
+                                        STREAM_WIDTH, STREAM_HEIGHT,
+                                        rga_mirror, rga_flip) != 0) {
+                /* Fallback to CPU copy if RGA fails */
+                memcpy(mb_vaddr, vi_vaddr, (size_t)(STREAM_WIDTH * STREAM_HEIGHT * 3 / 2));
+            }
         }
 
         /* 8.3 Release VI frame ASAP so VI buffer pool doesn't stall */

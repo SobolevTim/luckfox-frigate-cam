@@ -133,6 +133,10 @@ int  isp_load_settings (const char *filepath);  /* returns 0 if file found */
 /* ── Context accessor (for advanced use) ────────────────────────────────── */
 rk_aiq_sys_ctx_t *isp_get_ctx(void);
 
+/* Returns 1 if the sensor driver supports hardware mirror/flip (via V4L2),
+ * 0 if software RGA fallback must be used. Probed once at isp_init(). */
+int isp_sensor_supports_flip(void);
+
 #ifdef __cplusplus
 }
 #endif
