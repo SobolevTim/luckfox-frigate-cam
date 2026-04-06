@@ -22,18 +22,8 @@ static int               g_sensor_flip_supported = 0;
 
 typedef struct {
     int valid;
-    int has_exp_time;
-    int has_exp_gain;
-    int has_nr_mode;
-    int has_anr_level;
-    int has_drc_gain;
-    paRange_t exp_time_range;
-    paRange_t exp_gain_range;
-    opMode_t nr_mode;
-    unsigned int anr_level;
-    float drc_gain;
-    float drc_alpha;
-    float drc_clip;
+    int saved_fps;
+    int saved_bitrate_kbps;
 } day_hw_profile_t;
 
 static day_hw_profile_t g_day_hw;
@@ -114,54 +104,31 @@ static int cache_day_hw_profile(void) {
         pthread_mutex_unlock(&g_lock);
         return 0;
     }
+    g_day_hw.saved_fps         = g_cfg.fps;
+    g_day_hw.saved_bitrate_kbps = g_cfg.bitrate_kbps;
+    g_day_hw.valid = 1;
     pthread_mutex_unlock(&g_lock);
 
-    day_hw_profile_t snapshot;
-    memset(&snapshot, 0, sizeof(snapshot));
-
-    if (rk_aiq_uapi2_getExpTimeRange(g_ctx, &snapshot.exp_time_range) == XCAM_RETURN_NO_ERROR)
-        snapshot.has_exp_time = 1;
-
-    if (rk_aiq_uapi2_getExpGainRange(g_ctx, &snapshot.exp_gain_range) == XCAM_RETURN_NO_ERROR)
-        snapshot.has_exp_gain = 1;
-
-    if (rk_aiq_uapi2_getNRMode(g_ctx, &snapshot.nr_mode) == XCAM_RETURN_NO_ERROR)
-        snapshot.has_nr_mode = 1;
-
-    if (rk_aiq_uapi2_getANRStrth(g_ctx, &snapshot.anr_level) == XCAM_RETURN_NO_ERROR)
-        snapshot.has_anr_level = 1;
-
-    if (rk_aiq_uapi2_getDrcGain(g_ctx, &snapshot.drc_gain,
-                                &snapshot.drc_alpha,
-                                &snapshot.drc_clip) == XCAM_RETURN_NO_ERROR)
-        snapshot.has_drc_gain = 1;
-
-    snapshot.valid = snapshot.has_exp_time || snapshot.has_exp_gain ||
-                     snapshot.has_nr_mode || snapshot.has_anr_level ||
-                     snapshot.has_drc_gain;
-
-    pthread_mutex_lock(&g_lock);
-    g_day_hw = snapshot;
-    pthread_mutex_unlock(&g_lock);
-
-    if (snapshot.valid)
-        printf("[ISP] cached day HW profile for night-mode restore\n");
-
+    printf("[ISP] cached day profile: fps=%d bitrate=%d\n",
+           g_day_hw.saved_fps, g_day_hw.saved_bitrate_kbps);
     return 0;
 }
 
+/*
+ * Night HW profile: do NOT override ANR/TNR/DRC/HLC/AE speed.
+ * The ISP 3A engine with the sensor's IQ tuning file already handles
+ * low-light NR/exposure.  Manual overrides conflict with it and make
+ * the image worse.  We only switch to grayscale and confirm AE AUTO.
+ */
 static int apply_night_hw_profile(void) {
     if (!g_ctx) return -1;
 
     int ok = 0;
 
+    /* Ensure AE is in AUTO so the sensor can use longer exposure times */
     ok |= xcam_status_to_int("setExpMode(OP_AUTO)",
                              rk_aiq_uapi2_setExpMode(g_ctx, OP_AUTO));
 
-    ok |= xcam_status_to_int("setNRMode(OP_AUTO)",
-                             rk_aiq_uapi2_setNRMode(g_ctx, OP_AUTO));
-    ok |= xcam_status_to_int("setANRStrth(night)",
-                             rk_aiq_uapi2_setANRStrth(g_ctx, ISP_NIGHT_ANR_LEVEL));
     return ok;
 }
 
@@ -170,12 +137,14 @@ static int restore_day_hw_profile(void) {
 
     int ok = 0;
 
+    /* AE AUTO */
     ok |= xcam_status_to_int("setExpMode(OP_AUTO)",
                              rk_aiq_uapi2_setExpMode(g_ctx, OP_AUTO));
-    ok |= xcam_status_to_int("setNRMode(OP_AUTO)",
-                             rk_aiq_uapi2_setNRMode(g_ctx, OP_AUTO));
-    ok |= xcam_status_to_int("setANRStrth(day)",
-                             rk_aiq_uapi2_setANRStrth(g_ctx, ISP_DAY_ANR_LEVEL));
+
+    /* Force AWB back to AUTO — critical after GRAY→COLOR transition,
+     * otherwise AWB can get stuck with wrong colour matrix (purple tint). */
+    ok |= xcam_status_to_int("setWBMode(OP_AUTO)",
+                             rk_aiq_uapi2_setWBMode(g_ctx, OP_AUTO));
 
     pthread_mutex_lock(&g_lock);
     memset(&g_day_hw, 0, sizeof(g_day_hw));
@@ -256,6 +225,18 @@ int isp_init(int cam_id, const char *iq_dir, int width, int height) {
         XCamReturn wb_rc = rk_aiq_uapi2_setWBMode(g_ctx, OP_AUTO);
         printf("[ISP] force AWB → AUTO: %s\n",
                wb_rc == XCAM_RETURN_NO_ERROR ? "ok" : "FAILED");
+    }
+
+    /* Force TNR (Temporal Noise Reduction) OFF.
+     * The IQ profile auto-enables TNR in low light which causes ghosting
+     * on moving objects — they leave semi-transparent trails and blend with
+     * the background, making motion detection impossible.
+     * For a surveillance camera, sharp moving objects are more important
+     * than smooth noise.  setMTNRStrth(true, 0) = manual override to zero. */
+    {
+        XCamReturn tnr_rc = rk_aiq_uapi2_setMTNRStrth(g_ctx, true, 0);
+        printf("[ISP] force TNR → OFF: %s\n",
+               tnr_rc == XCAM_RETURN_NO_ERROR ? "ok" : "FAILED");
     }
 
     /* Probe sensor mirror/flip support.
@@ -521,27 +502,26 @@ int isp_set_night_mode(int enabled) {
         cache_day_hw_profile();
 
     if (enabled) {
-        /* Night preset: prioritize visibility and SNR over color fidelity */
-        ok |= isp_set_daynight  (DAYNIGHT_GRAY);
-        ok |= isp_set_brightness(ISP_NIGHT_BRIGHTNESS);
-        ok |= isp_set_contrast  (ISP_NIGHT_CONTRAST);
-        ok |= isp_set_saturation(ISP_NIGHT_SATURATION);
-        ok |= isp_set_sharpness (ISP_NIGHT_SHARPNESS);
-        ok |= isp_set_fps       (ISP_NIGHT_FPS);
+        /* Night mode: switch to grayscale and lower FPS for longer exposure.
+         * Do NOT override brightness/contrast/sharpness/NR/DRC/HLC — the ISP
+         * 3A engine with the sensor IQ tuning profile already handles
+         * low-light optimisation.  Manual overrides conflict with it. */
+        ok |= isp_set_daynight    (DAYNIGHT_GRAY);
+        ok |= isp_set_fps         (ISP_NIGHT_FPS);
         ok |= isp_set_bitrate_kbps(ISP_NIGHT_BITRATE_KBPS);
-        ok |= isp_set_anti_flicker(0, 0);
         ok |= apply_night_hw_profile();
     } else {
-        /* Day preset: restore colour defaults and rollback HW low-light tuning */
+        /* Day restore: read cached values, then reset HW, then restore FPS.
+         * Must read g_day_hw BEFORE restore_day_hw_profile clears it. */
+        pthread_mutex_lock(&g_lock);
+        int day_fps     = g_day_hw.valid ? g_day_hw.saved_fps          : ISP_DEFAULT_FPS;
+        int day_bitrate = g_day_hw.valid ? g_day_hw.saved_bitrate_kbps : ISP_DEFAULT_BITRATE_KBPS;
+        pthread_mutex_unlock(&g_lock);
+
+        ok |= isp_set_daynight    (DAYNIGHT_COLOR);
         ok |= restore_day_hw_profile();
-        ok |= isp_set_daynight  (DAYNIGHT_COLOR);
-        ok |= isp_set_brightness(ISP_DEFAULT_BRIGHTNESS);
-        ok |= isp_set_contrast  (ISP_DEFAULT_CONTRAST);
-        ok |= isp_set_saturation(ISP_DEFAULT_SATURATION);
-        ok |= isp_set_sharpness (ISP_DEFAULT_SHARPNESS);
-        ok |= isp_set_fps       (ISP_DEFAULT_FPS);
-        ok |= isp_set_bitrate_kbps(ISP_DEFAULT_BITRATE_KBPS);
-        ok |= isp_set_anti_flicker(1, 0);
+        ok |= isp_set_fps         (day_fps);
+        ok |= isp_set_bitrate_kbps(day_bitrate);
     }
 
     pthread_mutex_lock(&g_lock);

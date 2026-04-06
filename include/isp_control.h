@@ -86,17 +86,16 @@ typedef struct {
 #define ISP_DEFAULT_SUB_FPS          10
 #define ISP_SETTINGS_FILE           "/etc/camera_rtsp.json"
 
-/* Night-mode preset values (optimised for MIS5001 in near-darkness) */
-#define ISP_NIGHT_BRIGHTNESS        165
-#define ISP_NIGHT_CONTRAST           92
-#define ISP_NIGHT_SATURATION          0
-#define ISP_NIGHT_SHARPNESS          22
-#define ISP_NIGHT_FPS                12
-#define ISP_NIGHT_BITRATE_KBPS    12288
-#define ISP_NIGHT_ANR_LEVEL          80
-
-/* Day rollback values for stable night->day transition */
-#define ISP_DAY_ANR_LEVEL           50
+/*
+ * Night-mode preset: minimal intervention.
+ *
+ * The ISP 3A engine (AE, AWB, ANR, TNR, DRC) with the sensor's IQ tuning
+ * profile already handles low-light optimisation automatically.
+ * Night mode only switches to grayscale and lowers FPS for longer exposure.
+ * All other ISP parameters remain at their user-set or IQ-default values.
+ */
+#define ISP_NIGHT_FPS                15   /* lower FPS → longer sensor exposure   */
+#define ISP_NIGHT_BITRATE_KBPS    12288   /* more bits for noisy night frames     */
 
 /* ── Lifecycle ───────────────────────────────────────────────────────────── */
 /*

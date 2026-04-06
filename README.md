@@ -24,7 +24,7 @@ HA Discovery — все сущности появляются в Home Assistant 
 | RTSP Sub stream (detect для Frigate, RGA downscale) | ✅ |
 | RTSP Audio (G.711A / PCMA) | 🧪 экспериментально (только Pico Ultra, встроенный микрофон) |
 | Аппаратный ISP (rkaiq) | ✅ |
-| Нет CPU конвертации YUV→RGB | ✅ (чище оригинала) |
+| Нет CPU конвертации YUV→RGB | ✅ |
 | Яркость / Контраст / Насыщенность / Оттенок | ✅ |
 | Резкость | ✅ |
 | Режим день / ночь (оттенки серого) | ✅ |
