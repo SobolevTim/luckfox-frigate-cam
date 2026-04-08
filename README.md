@@ -48,6 +48,20 @@ HA Discovery — все сущности появляются в Home Assistant 
 - Дополнительная платформа: **Luckfox Pico Ultra W (RV1106)** с встроенным модулем Wi-Fi
 - Поддерживаемые сенсоры: camera MIS5001 или SC3336
 - Для централизованной работы: Ethernet LAN (Pico Ultra W также поддерживает Wi-Fi по 802.11ac)
+- Платы используют стандартную Buildroot + BusyBox систему от luckfox. Инструкции по прошивке и ссылки на загрузку образов доступны в вики:
+  https://wiki.luckfox.com/Luckfox-Pico-Ultra/Flash-image
+- Для платы `Luckfox Pico Ultra W` можно использовать встроенный Wi-Fi; параметры и настройки см. в вики:
+  https://wiki.luckfox.com/Luckfox-Pico-Ultra/WiFi-BT#1-wifi
+
+### Платформа и прошивка
+- Камеры работают на стандартной системе `Buildroot + BusyBox` от luckfox. Это базовая ОС для плат серии Pico.
+- Инструкции по установке системного образа и ссылки для скачивания официальных прошивок есть в вики:
+  https://wiki.luckfox.com/Luckfox-Pico-Ultra/Flash-image (ссылка для Pico Ultra W, аналогично для Pico Max)
+- Для `Luckfox Pico Ultra W` доступен встроенный Wi-Fi. Параметры модуля и примеры конфигурации см. здесь:
+  https://wiki.luckfox.com/Luckfox-Pico-Ultra/WiFi-BT#1-wifi (настройка через `/etc/wpa_supplicant.conf `)
+- После прошивки плату нужно настроить в сети: для стабильной работы с Frigate и Home Assistant рекомендуется задавать статический IP.
+  https://wiki.luckfox.com/Luckfox-Pico-Ultra/Autostart#4-configuring-a-static-ip (ссылка для Pico Ultra W, аналогично для Pico Max)
+
 
 ### Платы Luckfox Pico
 - `Luckfox Pico Max` — RV1106G3, 256MB DDR3L, SPI NAND FLASH(256MB), MIPI CSI 2-lane, DPI-interface RGB666, Ethernet 100M, USB 2.0 Host/Device, 26 GPIO pins.
@@ -95,6 +109,8 @@ Sub stream (по умолчанию `640x360 @ 10fps, 512 kbps`):
 - `-DENABLE_AUDIO=ON|OFF`
 - `-DAUDIO_SAMPLE_RATE=8000|16000`
 - `-DAUDIO_CHANNELS=1|2`
+
+Сборку приложения можно выполнить самостоятельно по инструкции выше. Альтернативно, выберите готовую сборку для нужного сенсора в релизах этого репозитория.
 
 Бинарник появится в `install/uclibc/bin/luckfox_camera_rtsp`.
 
