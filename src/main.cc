@@ -56,6 +56,8 @@
 #define MAX_VENC_GET_ERRORS  10
 #define STREAM_STALL_TIMEOUT_S 20
 #define HEARTBEAT_UPDATE_INTERVAL_US 1000000
+#define SUB_VENC_SEND_TIMEOUT_MS 100
+#define SUB_VENC_GET_TIMEOUT_MS  100
 
 #if ENABLE_AUDIO_STREAM
 #ifndef AUDIO_SAMPLE_RATE
@@ -296,7 +298,29 @@ int main(int argc, char *argv[]) {
     MB_BLK mb_blk = RK_MPI_MB_GetMB(mb_pool,
                                      (RK_U32)(STREAM_WIDTH * STREAM_HEIGHT * 3 / 2),
                                      RK_TRUE);
+    if (mb_blk == MB_INVALID_HANDLE) {
+        fprintf(stderr, "[MAIN] MB pool allocation failed for main stream\n");
+        RK_MPI_MB_DestroyPool(mb_pool);
+        venc_deinit(VENC_SUB_CHN_ID);
+        venc_deinit(VENC_CHN_ID);
+        vi_deinit(VI_DEV_ID, VI_CHN_ID);
+        RK_MPI_SYS_Exit();
+        isp_stop();
+        return 1;
+    }
+
     void *mb_vaddr = RK_MPI_MB_Handle2VirAddr(mb_blk);
+    if (!mb_vaddr) {
+        fprintf(stderr, "[MAIN] MB handle to virtual address failed for main stream\n");
+        RK_MPI_MB_ReleaseMB(mb_blk);
+        RK_MPI_MB_DestroyPool(mb_pool);
+        venc_deinit(VENC_SUB_CHN_ID);
+        venc_deinit(VENC_CHN_ID);
+        vi_deinit(VI_DEV_ID, VI_CHN_ID);
+        RK_MPI_SYS_Exit();
+        isp_stop();
+        return 1;
+    }
 
     /* Sub stream buffer (smaller resolution, separate DMA pool) */
     MB_POOL_CONFIG_S sub_pool_cfg;
@@ -320,7 +344,33 @@ int main(int argc, char *argv[]) {
     MB_BLK sub_mb_blk = RK_MPI_MB_GetMB(sub_mb_pool,
                                           (RK_U32)(SUB_STREAM_WIDTH * SUB_STREAM_HEIGHT * 3 / 2),
                                           RK_TRUE);
+    if (sub_mb_blk == MB_INVALID_HANDLE) {
+        fprintf(stderr, "[MAIN] MB pool allocation failed for sub stream\n");
+        RK_MPI_MB_DestroyPool(sub_mb_pool);
+        RK_MPI_MB_ReleaseMB(mb_blk);
+        RK_MPI_MB_DestroyPool(mb_pool);
+        venc_deinit(VENC_SUB_CHN_ID);
+        venc_deinit(VENC_CHN_ID);
+        vi_deinit(VI_DEV_ID, VI_CHN_ID);
+        RK_MPI_SYS_Exit();
+        isp_stop();
+        return 1;
+    }
+
     void *sub_mb_vaddr = RK_MPI_MB_Handle2VirAddr(sub_mb_blk);
+    if (!sub_mb_vaddr) {
+        fprintf(stderr, "[MAIN] MB handle to virtual address failed for sub stream\n");
+        RK_MPI_MB_ReleaseMB(sub_mb_blk);
+        RK_MPI_MB_DestroyPool(sub_mb_pool);
+        RK_MPI_MB_ReleaseMB(mb_blk);
+        RK_MPI_MB_DestroyPool(mb_pool);
+        venc_deinit(VENC_SUB_CHN_ID);
+        venc_deinit(VENC_CHN_ID);
+        vi_deinit(VI_DEV_ID, VI_CHN_ID);
+        RK_MPI_SYS_Exit();
+        isp_stop();
+        return 1;
+    }
 
     /* VENC input frame descriptor — main */
     VIDEO_FRAME_INFO_S venc_frame;
@@ -360,11 +410,41 @@ int main(int argc, char *argv[]) {
 
     /* Main stream session: /live/0 */
     rtsp_session_handle rtsp_session = rtsp_new_session(rtsp_handle, RTSP_PATH);
+    if (!rtsp_session) {
+        fprintf(stderr, "[MAIN] RTSP main session creation failed\n");
+        rtsp_del_demo(rtsp_handle);
+        RK_MPI_MB_ReleaseMB(sub_mb_blk);
+        RK_MPI_MB_DestroyPool(sub_mb_pool);
+        RK_MPI_MB_ReleaseMB(mb_blk);
+        RK_MPI_MB_DestroyPool(mb_pool);
+        venc_deinit(VENC_SUB_CHN_ID);
+        venc_deinit(VENC_CHN_ID);
+        vi_deinit(VI_DEV_ID, VI_CHN_ID);
+        RK_MPI_SYS_Exit();
+        isp_stop();
+        return 1;
+    }
+
     rtsp_set_video(rtsp_session, RTSP_CODEC_ID_VIDEO_H264, NULL, 0);
     rtsp_sync_video_ts(rtsp_session, rtsp_get_reltime(), rtsp_get_ntptime());
 
     /* Sub stream session: /live/1 (video-only, no audio) */
     rtsp_session_handle rtsp_sub_session = rtsp_new_session(rtsp_handle, RTSP_SUB_PATH);
+    if (!rtsp_sub_session) {
+        fprintf(stderr, "[MAIN] RTSP sub session creation failed\n");
+        rtsp_del_demo(rtsp_handle);
+        RK_MPI_MB_ReleaseMB(sub_mb_blk);
+        RK_MPI_MB_DestroyPool(sub_mb_pool);
+        RK_MPI_MB_ReleaseMB(mb_blk);
+        RK_MPI_MB_DestroyPool(mb_pool);
+        venc_deinit(VENC_SUB_CHN_ID);
+        venc_deinit(VENC_CHN_ID);
+        vi_deinit(VI_DEV_ID, VI_CHN_ID);
+        RK_MPI_SYS_Exit();
+        isp_stop();
+        return 1;
+    }
+
     rtsp_set_video(rtsp_sub_session, RTSP_CODEC_ID_VIDEO_H264, NULL, 0);
     rtsp_sync_video_ts(rtsp_sub_session, rtsp_get_reltime(), rtsp_get_ntptime());
 
@@ -576,9 +656,11 @@ int main(int argc, char *argv[]) {
                     sub_venc_frame.stVFrame.u32TimeRef = sub_time_ref++;
                     sub_venc_frame.stVFrame.u64PTS     = get_now_us();
 
-                    ret = RK_MPI_VENC_SendFrame(VENC_SUB_CHN_ID, &sub_venc_frame, 2000);
+                    ret = RK_MPI_VENC_SendFrame(VENC_SUB_CHN_ID, &sub_venc_frame,
+                                                SUB_VENC_SEND_TIMEOUT_MS);
                     if (ret == RK_SUCCESS) {
-                        ret = RK_MPI_VENC_GetStream(VENC_SUB_CHN_ID, &sub_venc_stream, 2000);
+                        ret = RK_MPI_VENC_GetStream(VENC_SUB_CHN_ID, &sub_venc_stream,
+                                                    SUB_VENC_GET_TIMEOUT_MS);
                         if (ret == RK_SUCCESS) {
                             sub_stats_frames_window++;
                             sub_stats_bytes_window += (unsigned long long)sub_venc_stream.pstPack->u32Len;
