@@ -28,6 +28,8 @@
 #include <pthread.h>
 #include <time.h>
 #include <stdint.h>
+#include <limits.h>
+#include <atomic>
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -40,10 +42,15 @@
 
 static int parse_int_payload(const char *value, int *out_value)
 {
+    if (!value || !out_value)
+        return -1;
+
     char *end = NULL;
+    errno = 0;
     long parsed = strtol(value, &end, 10);
 
-    if (end == value || *end != '\0')
+    if (errno == ERANGE || end == value || *end != '\0' ||
+        parsed < INT_MIN || parsed > INT_MAX)
         return -1;
 
     *out_value = (int)parsed;
@@ -63,13 +70,32 @@ static int parse_int_payload(const char *value, int *out_value)
 
 /* ── Globals ─────────────────────────────────────────────────────────────── */
 static mqtt_config_t    g_cfg;
-static int              g_sock      = -1;
-static volatile int     g_running   = 0;
+static std::atomic<int> g_sock(-1);
+static std::atomic<bool> g_running(false);
 static pthread_t        g_thread;
 static pthread_mutex_t  g_write_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t  g_stats_mtx = PTHREAD_MUTEX_INITIALIZER;
 static struct timespec  g_start_mono = {0, 0};
 static mqtt_runtime_stats_t g_runtime_stats = {-1, -1, -1, -1};
+
+static int mqtt_socket_get(void)
+{
+    return g_sock.load(std::memory_order_acquire);
+}
+
+static void mqtt_socket_set(int sock)
+{
+    g_sock.store(sock, std::memory_order_release);
+}
+
+static void mqtt_socket_close(void)
+{
+    pthread_mutex_lock(&g_write_mtx);
+    int sock = g_sock.exchange(-1, std::memory_order_acq_rel);
+    if (sock >= 0)
+        close(sock);
+    pthread_mutex_unlock(&g_write_mtx);
+}
 
 typedef struct {
     unsigned long long idle;
@@ -296,10 +322,22 @@ static int build_subscribe(uint8_t *buf, size_t bufsz,
 static int mqtt_send(const uint8_t *data, int len)
 {
     pthread_mutex_lock(&g_write_mtx);
+    int sock = mqtt_socket_get();
+    if (sock < 0) {
+        pthread_mutex_unlock(&g_write_mtx);
+        return -1;
+    }
+
     int sent = 0;
     while (sent < len) {
-        int r = (int)write(g_sock, data + sent, (size_t)(len - sent));
-        if (r <= 0) {
+        int r = (int)write(sock, data + sent, (size_t)(len - sent));
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            pthread_mutex_unlock(&g_write_mtx);
+            return -1;
+        }
+        if (r == 0) {
             pthread_mutex_unlock(&g_write_mtx);
             return -1;
         }
@@ -312,7 +350,7 @@ static int mqtt_send(const uint8_t *data, int len)
 /* Publish a message (thread-safe). Returns 0 or -1. */
 static int do_publish(const char *topic, const char *payload, int retain)
 {
-    if (g_sock < 0) return -1;
+    if (mqtt_socket_get() < 0) return -1;
     uint8_t buf[MQTT_BUF_SIZE];
     int len = build_publish(buf, sizeof(buf), topic, payload, retain);
     if (len < 0) { fprintf(stderr, "[MQTT] publish buf too small\n"); return -1; }
@@ -329,10 +367,20 @@ static int publish_availability(const char *status)
 /* Read exactly len bytes from socket. Returns 0 or -1. */
 static int recv_exact(uint8_t *buf, int len)
 {
+    int sock = mqtt_socket_get();
+    if (sock < 0)
+        return -1;
+
     int got = 0;
     while (got < len) {
-        int r = (int)recv(g_sock, buf + got, (size_t)(len - got), 0);
-        if (r <= 0) return -1;
+        int r = (int)recv(sock, buf + got, (size_t)(len - got), 0);
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (r == 0)
+            return -1;
         got += r;
     }
     return 0;
@@ -346,6 +394,8 @@ static int read_varlen(int *out)
         uint8_t b;
         if (recv_exact(&b, 1) != 0) return -1;
         val  += (b & 0x7F) * mult;
+        if ((b & 0x80) && i == 3)
+            return -1; /* malformed variable-length field */
         mult *= 128;
         if (!(b & 0x80)) break;
     }
@@ -693,15 +743,74 @@ void mqtt_set_audio_runtime_enabled(int enabled)
  * HA MQTT Discovery builders
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+static int json_escape(char *dst, size_t dst_sz, const char *src)
+{
+    if (!dst || dst_sz == 0 || !src)
+        return -1;
+
+    size_t di = 0;
+    for (size_t si = 0; src[si] != '\0'; ++si) {
+        unsigned char c = (unsigned char)src[si];
+        const char *esc = NULL;
+        char ctrl[7];
+
+        switch (c) {
+        case '\\': esc = "\\\\"; break;
+        case '"':  esc = "\\\""; break;
+        case '\b': esc = "\\b"; break;
+        case '\f': esc = "\\f"; break;
+        case '\n': esc = "\\n"; break;
+        case '\r': esc = "\\r"; break;
+        case '\t': esc = "\\t"; break;
+        default:
+            if (c < 0x20) {
+                snprintf(ctrl, sizeof(ctrl), "\\u%04x", (unsigned)c);
+                esc = ctrl;
+            }
+            break;
+        }
+
+        if (esc) {
+            size_t elen = strlen(esc);
+            if (di + elen >= dst_sz)
+                return -1;
+            memcpy(dst + di, esc, elen);
+            di += elen;
+        } else {
+            if (di + 1 >= dst_sz)
+                return -1;
+            dst[di++] = (char)c;
+        }
+    }
+
+    dst[di] = '\0';
+    return 0;
+}
+
 /* Device JSON fragment (reused in every discovery message) */
 static void device_json(char *buf, int bufsz)
 {
+    char node_id_esc[256];
+    char device_name_esc[384];
+    char model_esc[128];
+
+    const char *node_id = g_cfg.node_id;
+    const char *device_name = g_cfg.device_name;
+    const char *model = CAMERA_SENSOR_PROFILE;
+
+    if (json_escape(node_id_esc, sizeof(node_id_esc), g_cfg.node_id) == 0)
+        node_id = node_id_esc;
+    if (json_escape(device_name_esc, sizeof(device_name_esc), g_cfg.device_name) == 0)
+        device_name = device_name_esc;
+    if (json_escape(model_esc, sizeof(model_esc), CAMERA_SENSOR_PROFILE) == 0)
+        model = model_esc;
+
     snprintf(buf, (size_t)bufsz,
         "\"device\":{\"identifiers\":[\"%s\"],"
         "\"name\":\"%s\","
-    "\"model\":\"RV1106 Camera (%s)\","
+        "\"model\":\"RV1106 Camera (%s)\","
         "\"manufacturer\":\"Luckfox\"}",
-    g_cfg.node_id, g_cfg.device_name, CAMERA_SENSOR_PROFILE);
+        node_id, device_name, model);
 }
 
 static void publish_sensor(const char *param, const char *name,
@@ -1134,12 +1243,31 @@ static void publish_ack(const char *param, const char *status, const char *messa
 {
     char topic[128];
     char payload[512];
+    char param_esc[160];
+    char status_esc[64];
+    char message_esc[256];
+
+    const char *safe_param = (param && param[0] != '\0') ? param : "unknown";
+    const char *safe_status = (status && status[0] != '\0') ? status : "error";
+    const char *safe_message = (message && message[0] != '\0') ? message : "unspecified";
+
+    if (json_escape(param_esc, sizeof(param_esc), safe_param) != 0)
+        strncpy(param_esc, "unknown", sizeof(param_esc) - 1);
+    if (json_escape(status_esc, sizeof(status_esc), safe_status) != 0)
+        strncpy(status_esc, "error", sizeof(status_esc) - 1);
+    if (json_escape(message_esc, sizeof(message_esc), safe_message) != 0)
+        strncpy(message_esc, "unspecified", sizeof(message_esc) - 1);
+
+    param_esc[sizeof(param_esc) - 1] = '\0';
+    status_esc[sizeof(status_esc) - 1] = '\0';
+    message_esc[sizeof(message_esc) - 1] = '\0';
+
     snprintf(topic, sizeof(topic), "%s/ack", g_cfg.node_id);
     snprintf(payload, sizeof(payload),
              "{\"param\":\"%s\",\"status\":\"%s\",\"message\":\"%s\"}",
-             param ? param : "unknown",
-             status ? status : "error",
-             message ? message : "unspecified");
+             param_esc,
+             status_esc,
+             message_esc);
     do_publish(topic, payload, 0);
 }
 
@@ -1589,52 +1717,74 @@ static int process_one_packet(void)
 
 static int mqtt_connect(void)
 {
-    /* Resolve broker hostname */
-    struct hostent *he = gethostbyname(g_cfg.broker_host);
-    if (!he) {
-        fprintf(stderr, "[MQTT] cannot resolve '%s'\n", g_cfg.broker_host);
+    struct addrinfo hints;
+    struct addrinfo *res = NULL;
+    struct addrinfo *it = NULL;
+    char port_str[16];
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    snprintf(port_str, sizeof(port_str), "%d", g_cfg.broker_port);
+    int gai = getaddrinfo(g_cfg.broker_host, port_str, &hints, &res);
+    if (gai != 0) {
+        fprintf(stderr, "[MQTT] cannot resolve '%s': %s\n",
+                g_cfg.broker_host, gai_strerror(gai));
         return -1;
     }
 
-    g_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (g_sock < 0) { perror("[MQTT] socket"); return -1; }
+    int sock = -1;
+    for (it = res; it != NULL; it = it->ai_next) {
+        sock = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        if (sock < 0)
+            continue;
 
-    /* Disable Nagle's algorithm — reduces MQTT command latency by up to 200 ms */
-    {
         int flag = 1;
-        setsockopt(g_sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+
+        if (connect(sock, it->ai_addr, it->ai_addrlen) == 0)
+            break;
+
+        close(sock);
+        sock = -1;
     }
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons((uint16_t)g_cfg.broker_port);
-    memcpy(&addr.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
-
-    if (connect(g_sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        perror("[MQTT] connect");
-        close(g_sock); g_sock = -1;
+    freeaddrinfo(res);
+    if (sock < 0) {
+        fprintf(stderr, "[MQTT] connect to %s:%d failed\n",
+                g_cfg.broker_host, g_cfg.broker_port);
         return -1;
     }
+
+    mqtt_socket_set(sock);
 
     /* Send CONNECT */
     {
         uint8_t pkt[512];
         int len = build_connect(pkt, sizeof(pkt));
         if (len < 0 || mqtt_send(pkt, len) != 0) {
-            close(g_sock); g_sock = -1;
+            mqtt_socket_close();
             return -1;
         }
     }
 
     /* Wait for CONNACK with a short timeout */
     {
+        int conn_sock = mqtt_socket_get();
+        if (conn_sock < 0)
+            return -1;
+
         struct timeval tv = {MQTT_CONNACK_TIMEOUT_S, 0};
-        setsockopt(g_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(conn_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         int rc = process_one_packet();
         tv.tv_sec = 0;
-        setsockopt(g_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); /* clear */
-        if (rc != 0) { close(g_sock); g_sock = -1; return -1; }
+        setsockopt(conn_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); /* clear */
+        if (rc != 0) {
+            mqtt_socket_close();
+            return -1;
+        }
     }
 
     /* Publish availability = online (retained) */
@@ -1687,12 +1837,12 @@ static void *mqtt_thread_fn(void *arg)
     if (discovery_refresh_interval_s <= 0)
         discovery_refresh_interval_s = MQTT_DISCOVERY_REFRESH_S;
 
-    while (g_running) {
+    while (g_running.load(std::memory_order_acquire)) {
 
         /* ── (Re)connect ───────────────────────────────────────────────── */
         if (mqtt_connect() != 0) {
             printf("[MQTT] Retrying in %ds...\n", reconnect_delay);
-            for (int i = 0; i < reconnect_delay && g_running; i++) sleep(1);
+            for (int i = 0; i < reconnect_delay && g_running.load(std::memory_order_acquire); i++) sleep(1);
             reconnect_delay = reconnect_delay * 2;
             if (reconnect_delay > MQTT_RECONNECT_MAX_S)
                 reconnect_delay = MQTT_RECONNECT_MAX_S;
@@ -1705,14 +1855,18 @@ static void *mqtt_thread_fn(void *arg)
         /* ── Receive / keepalive loop ───────────────────────────────────── */
         time_t last_ping = time(NULL);
 
-        while (g_running) {
+        while (g_running.load(std::memory_order_acquire)) {
+            int sock = mqtt_socket_get();
+            if (sock < 0)
+                break;
+
             fd_set rfds;
             FD_ZERO(&rfds);
-            FD_SET(g_sock, &rfds);
+            FD_SET(sock, &rfds);
             struct timeval tv = {5, 0}; /* wake every 5 s to check PING */
-            int r = select(g_sock + 1, &rfds, NULL, NULL, &tv);
+            int r = select(sock + 1, &rfds, NULL, NULL, &tv);
 
-            if (!g_running) break;
+            if (!g_running.load(std::memory_order_acquire)) break;
 
             if (r < 0) {
                 if (errno == EINTR) continue;
@@ -1750,18 +1904,17 @@ static void *mqtt_thread_fn(void *arg)
         }
 
         /* ── Clean disconnect ───────────────────────────────────────────── */
-        if (g_sock >= 0) {
-            if (!g_running)
+        if (mqtt_socket_get() >= 0) {
+            if (!g_running.load(std::memory_order_acquire))
                 publish_availability("offline");
             uint8_t disc[2] = {0xE0, 0x00};
-            mqtt_send(disc, 2);
-            close(g_sock);
-            g_sock = -1;
+            (void)mqtt_send(disc, 2);
+            mqtt_socket_close();
         }
 
-        if (g_running) {
+        if (g_running.load(std::memory_order_acquire)) {
             printf("[MQTT] Reconnecting in %ds...\n", reconnect_delay);
-            for (int i = 0; i < reconnect_delay && g_running; i++) sleep(1);
+            for (int i = 0; i < reconnect_delay && g_running.load(std::memory_order_acquire); i++) sleep(1);
             reconnect_delay = reconnect_delay * 2;
             if (reconnect_delay > MQTT_RECONNECT_MAX_S)
                 reconnect_delay = MQTT_RECONNECT_MAX_S;
@@ -1787,15 +1940,25 @@ void mqtt_config_init(mqtt_config_t *cfg)
 
 int mqtt_client_start(const mqtt_config_t *cfg)
 {
-    if (g_running) return 0;
+    if (!cfg) {
+        fprintf(stderr, "[MQTT] start failed: cfg is null\n");
+        return -1;
+    }
+    if (cfg->broker_port <= 0 || cfg->broker_port > 65535) {
+        fprintf(stderr, "[MQTT] start failed: invalid broker port %d\n", cfg->broker_port);
+        return -1;
+    }
+    if (g_running.load(std::memory_order_acquire)) return 0;
+
     g_cfg     = *cfg;
     clock_gettime(CLOCK_MONOTONIC, &g_start_mono);
     g_cpu_sample.valid = 0;
-    g_running = 1;
+    mqtt_socket_set(-1);
+    g_running.store(true, std::memory_order_release);
     int err = pthread_create(&g_thread, NULL, mqtt_thread_fn, NULL);
     if (err) {
         fprintf(stderr, "[MQTT] pthread_create failed: %d\n", err);
-        g_running = 0;
+        g_running.store(false, std::memory_order_release);
         return -1;
     }
     return 0;
@@ -1803,8 +1966,8 @@ int mqtt_client_start(const mqtt_config_t *cfg)
 
 void mqtt_client_stop(void)
 {
-    if (!g_running) return;
-    g_running = 0;
+    if (!g_running.load(std::memory_order_acquire)) return;
+    g_running.store(false, std::memory_order_release);
     pthread_join(g_thread, NULL);
-    if (g_sock >= 0) { close(g_sock); g_sock = -1; }
+    mqtt_socket_close();
 }

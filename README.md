@@ -34,7 +34,7 @@ HA Discovery — все сущности появляются в Home Assistant 
 | Изменение битрейта на лету | ✅ |
 | Изменение FPS на лету | ✅ |
 | MQTT + HA Auto-Discovery | ✅ (все сущности автоматически) |
-| Валидация и clamp входных значений | ✅ |
+| Валидация и отклонение невалидных значений | ✅ |
 | Сохранение настроек на диск | ✅ (`/etc/camera_rtsp.json`) |
 | Корректное завершение по SIGINT/SIGTERM | ✅ |
 | Интеграция с Home Assistant | ✅ (см. ниже) |
@@ -120,12 +120,12 @@ ssh root@<CAMERA_IP>
 | Параметр | По умолчанию | Описание |
 |---|---|---|
 | `--mqtt-host` | `127.0.0.1` | IP или hostname MQTT брокера |
-| `--mqtt-port` | `1883` | TCP порт брокера |
+| `--mqtt-port` | `1883` | TCP порт брокера (`1..65535`) |
 | `--mqtt-user` | — | Имя пользователя (необязательно) |
 | `--mqtt-pass` | — | Пароль (необязательно) |
 | `--mqtt-id` | `luckfox_camera` | Client ID и префикс топиков |
 | `--mqtt-name` | `Luckfox Camera` | Отображаемое имя устройства в HA |
-| `--mqtt-discovery-refresh` | `0` | Периодическое обновление discovery (сек), `0` = выключено |
+| `--mqtt-discovery-refresh` | `0` | Периодическое обновление discovery (сек), `0..86400`, `0` = выключено |
 
 ### Автозапуск (init.d)
 
@@ -229,7 +229,7 @@ mosquitto_sub -h <BROKER_IP> -t 'luckfox_camera/state'
 # Установить яркость
 mosquitto_pub -h <BROKER_IP> -t luckfox_camera/brightness/set -m 100
 
-# Принудительный night_mode (low-light профиль ISP)
+# Принудительный night_mode (grayscale + сниженный FPS + повышенный битрейт)
 mosquitto_pub -h <BROKER_IP> -t luckfox_camera/night_mode/set -m ON
 
 # Базовый day/night (только цвет/серый)
@@ -274,7 +274,7 @@ mosquitto_pub -h <BROKER_IP> -t luckfox_camera/audio_hpf/set -m ON
 | `flip` | `ON` / `OFF` | Переворот |
 | `anti_flicker_en` | `ON` / `OFF` | Антимигание |
 | `anti_flicker_mode` | `50hz` / `auto` | Режим антифликера |
-| `night_mode` | `ON` / `OFF` | Расширенный low-light профиль ISP (AE/NR/DRC + FPS/bitrate) |
+| `night_mode` | `ON` / `OFF` | Ночной профиль: `ON` = grayscale + `fps=15` + `bitrate=12288`; `OFF` = возврат к дневному профилю |
 | `bitrate_kbps` | `1000`–`20000` | Битрейт видео |
 | `fps` | `10`–`30` | Частота кадров; GOP автоматически равен `fps` |
 | `audio_adc_alc_left_gain` | `0`–`31` | PGA-усиление АЦП: 0 дБ=6, шаг 1.5 дБ, макс +37.5 дБ=31; рекомендуемое значение **23** |

@@ -120,18 +120,15 @@ Examples:
 - `fps`: integer range `10..30`
 - `sub_bitrate_kbps`: integer range `100..5000`
 - `sub_fps`: integer range `5..30`
-- `mirror`, `flip`, `anti_flicker_en`, `night_mode`: `ON/OFF` or `1/0`
+- `mirror`, `flip`, `anti_flicker_en`: `ON/OFF` or `1/0`
 - `daynight`: `color` or `grayscale`
 - `anti_flicker_mode`: `50hz` or `auto`
 - `night_mode`: `ON` or `OFF`
   - `ON`: applies low-light ISP profile:
     - grayscale,
-    - brightness `165`, contrast `92`, saturation `0`, sharpness `22`,
-    - main stream `fps=12`, `bitrate_kbps=12288`,
-    - anti-flicker disabled,
-    - AE range expanded (`exposure time 0.0002..0.08 s`, `gain 1..64`),
-    - stronger noise reduction (ANR) in safe auto mode.
-  - `OFF`: restores day defaults for color/FPS/bitrate/anti-flicker and applies safe day AE/NR profile.
+    - main stream `fps=15`, `bitrate_kbps=12288`,
+    - AE mode forced to AUTO.
+  - `OFF`: restores day profile (cached `fps`/`bitrate`), switches back to color and re-applies safe day HW profile (AE/AWB AUTO).
 - `wb_preset`: one of named presets or integer `0..7`
 
 Each command publishes `<node_id>/ack` with status `ok` or `error`.
