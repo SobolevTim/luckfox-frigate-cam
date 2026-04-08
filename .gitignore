@@ -12,4 +12,4 @@ S99failover
 S99static
 *.env
 secrets.*
-arm-rockchip830-toolchain.tar.gz
+arm-rockchip830-toolchain*.tar.gz

@@ -77,6 +77,21 @@ static int env_flag_enabled(const char *name) {
     return strcmp(value, "0") != 0;
 }
 
+static int parse_cli_int_range(const char *text, int min_v, int max_v, int *out)
+{
+    if (!text || !out)
+        return -1;
+
+    errno = 0;
+    char *end = NULL;
+    long value = strtol(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' || value < min_v || value > max_v)
+        return -1;
+
+    *out = (int)value;
+    return 0;
+}
+
 static void ensure_heartbeat_dir(void) {
     if (mkdir(APP_HEARTBEAT_DIR, 0777) != 0 && errno != EEXIST) {
         fprintf(stderr, "[MAIN] WARNING: failed to create heartbeat dir %s: %s\n",
@@ -134,8 +149,12 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--mqtt-host") && i+1 < argc)
             strncpy(mqtt_cfg.broker_host, argv[++i], sizeof(mqtt_cfg.broker_host)-1);
-        else if (!strcmp(argv[i], "--mqtt-port") && i+1 < argc)
-            mqtt_cfg.broker_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--mqtt-port") && i+1 < argc) {
+            if (parse_cli_int_range(argv[++i], 1, 65535, &mqtt_cfg.broker_port) != 0) {
+                fprintf(stderr, "Invalid --mqtt-port value. Expected integer in range 1..65535\n");
+                return 1;
+            }
+        }
         else if (!strcmp(argv[i], "--mqtt-user") && i+1 < argc)
             strncpy(mqtt_cfg.username, argv[++i], sizeof(mqtt_cfg.username)-1);
         else if (!strcmp(argv[i], "--mqtt-pass") && i+1 < argc)
@@ -144,8 +163,12 @@ int main(int argc, char *argv[]) {
             strncpy(mqtt_cfg.node_id, argv[++i], sizeof(mqtt_cfg.node_id)-1);
         else if (!strcmp(argv[i], "--mqtt-name") && i+1 < argc)
             strncpy(mqtt_cfg.device_name, argv[++i], sizeof(mqtt_cfg.device_name)-1);
-        else if (!strcmp(argv[i], "--mqtt-discovery-refresh") && i+1 < argc)
-            mqtt_cfg.discovery_refresh_s = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--mqtt-discovery-refresh") && i+1 < argc) {
+            if (parse_cli_int_range(argv[++i], 0, 86400, &mqtt_cfg.discovery_refresh_s) != 0) {
+                fprintf(stderr, "Invalid --mqtt-discovery-refresh value. Expected integer in range 0..86400\n");
+                return 1;
+            }
+        }
         else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             fprintf(stderr, "Usage: %s [--mqtt-host H] [--mqtt-port P] "
@@ -155,9 +178,6 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
-
-    if (mqtt_cfg.discovery_refresh_s < 0)
-        mqtt_cfg.discovery_refresh_s = 0;
 
     printf("=======================================================\n");
     printf(" Luckfox Camera RTSP  |  %dx%d  H.264  %d fps\n",
