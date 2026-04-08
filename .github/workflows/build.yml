@@ -25,22 +25,27 @@ jobs:
         id: cache-toolchain
         uses: actions/cache@v4
         with:
-          path: ~/toolchain
+          path: ~/luckfox-sdk
           key: arm-rockchip830-v1
 
       - name: Download toolchain
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
-          mkdir -p ~/toolchain
+          rm -rf ~/luckfox-sdk
+          mkdir -p ~/luckfox-sdk
           curl -L "https://github.com/SobolevTim/luckfox-frigate-cam/releases/download/v0.0.0-toolchain/arm-rockchip830-toolchain.tar.gz" \
-            | tar xz -C ~/toolchain --strip-components=0
+            | tar xz -C ~/luckfox-sdk --strip-components=0
+
+      - name: Verify toolchain layout
+        run: |
+          test -f "$HOME/luckfox-sdk/tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf/bin/arm-rockchip830-linux-uclibcgnueabihf-gcc"
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake make
 
       - name: Build (${{ matrix.sensor }})
         run: |
-          export LUCKFOX_SDK_PATH="$HOME/toolchain"
+          export LUCKFOX_SDK_PATH="$HOME/luckfox-sdk"
           chmod +x build.sh
           ./build.sh --sensor ${{ matrix.sensor }}
 
