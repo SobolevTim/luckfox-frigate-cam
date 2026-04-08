@@ -48,10 +48,7 @@ HA Discovery — все сущности появляются в Home Assistant 
 - Дополнительная платформа: **Luckfox Pico Ultra W (RV1106)** с встроенным модулем Wi-Fi
 - Поддерживаемые сенсоры: camera MIS5001 или SC3336
 - Для централизованной работы: Ethernet LAN (Pico Ultra W также поддерживает Wi-Fi по 802.11ac)
-- Платы используют стандартную Buildroot + BusyBox систему от luckfox. Инструкции по прошивке и ссылки на загрузку образов доступны в вики:
-  https://wiki.luckfox.com/Luckfox-Pico-Ultra/Flash-image
-- Для платы `Luckfox Pico Ultra W` можно использовать встроенный Wi-Fi; параметры и настройки см. в вики:
-  https://wiki.luckfox.com/Luckfox-Pico-Ultra/WiFi-BT#1-wifi
+- Платы используют стандартную Buildroot + BusyBox систему от luckfox.
 
 ### Платформа и прошивка
 - Камеры работают на стандартной системе `Buildroot + BusyBox` от luckfox. Это базовая ОС для плат серии Pico.
