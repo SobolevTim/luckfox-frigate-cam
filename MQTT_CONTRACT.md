@@ -119,7 +119,7 @@ Examples:
 - `bitrate_kbps`: integer range `1000..20000`
 - `fps`: integer range `10..30`
 - `sub_bitrate_kbps`: integer range `100..5000`
-- `sub_fps`: integer range `5..30`
+- `sub_fps`: integer range `5..30` (effective stream output is capped by current main `fps`)
 - `mirror`, `flip`, `anti_flicker_en`: `ON/OFF` or `1/0`
 - `daynight`: `color` or `grayscale`
 - `anti_flicker_mode`: `50hz` or `auto`

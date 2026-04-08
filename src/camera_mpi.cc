@@ -145,7 +145,12 @@ int venc_init(int chn_id, int width, int height,
     VENC_RECV_PIC_PARAM_S recv;
     memset(&recv, 0, sizeof(recv));
     recv.s32RecvPicNum = -1; /* receive indefinitely */
-    RK_MPI_VENC_StartRecvFrame(chn_id, &recv);
+    ret = RK_MPI_VENC_StartRecvFrame(chn_id, &recv);
+    if (ret != RK_SUCCESS) {
+        printf("[VENC] StartRecvFrame failed: 0x%x\n", ret);
+        RK_MPI_VENC_DestroyChn(chn_id);
+        return -1;
+    }
 
     printf("[VENC] channel %d: %dx%d  %d kbps  %dfps  GOP=%d\n",
            chn_id, width, height, bitrate_kbps, fps, gop);
