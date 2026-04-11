@@ -241,11 +241,22 @@ int isp_init(int cam_id, const char *iq_dir, int width, int height) {
 
     /* Probe sensor mirror/flip support.
      * SC3336 exposes V4L2_CID_HFLIP/VFLIP, MIS5001 does not.
-     * We try a no-op setMirrorFlip(0,0) to detect support. */
+     * A no-op setMirrorFlip(false,false) succeeds on any sensor, so we must
+     * test with an actual change and verify the readback to be sure. */
     {
-        XCamReturn mf_rc = rk_aiq_uapi2_setMirrorFlip(g_ctx, false, false, 0);
-        g_sensor_flip_supported = (mf_rc == XCAM_RETURN_NO_ERROR) ? 1 : 0;
-        printf("[ISP] sensor mirror/flip support: %s (probe rc=%d)\n",
+        bool probe_ok = false;
+        XCamReturn mf_rc = rk_aiq_uapi2_setMirrorFlip(g_ctx, true, false, 0);
+        if (mf_rc == XCAM_RETURN_NO_ERROR) {
+            bool rb_mirror = false, rb_flip = false;
+            XCamReturn get_rc = rk_aiq_uapi2_getMirrorFlip(g_ctx, &rb_mirror, &rb_flip);
+            if (get_rc == XCAM_RETURN_NO_ERROR && rb_mirror) {
+                probe_ok = true;
+            }
+            /* Reset to default state regardless */
+            rk_aiq_uapi2_setMirrorFlip(g_ctx, false, false, 0);
+        }
+        g_sensor_flip_supported = probe_ok ? 1 : 0;
+        printf("[ISP] sensor mirror/flip support: %s (probe set_rc=%d)\n",
                g_sensor_flip_supported ? "YES (ISP API)" : "NO (RGA fallback)",
                mf_rc);
     }
@@ -404,14 +415,26 @@ int isp_set_mirror_flip(int mirror, int flip) {
      * When the sensor handles it, the VI output is already flipped and the
      * RGA capture loop must NOT apply a second transform (skip_frm_cnt=4
      * tells the ISP to skip 4 frames while the sensor reconfigures).
-     * If the ISP API fails, we fall back to RGA transform in the main loop.
+     * If the ISP API fails or the readback doesn't match, we fall back to
+     * RGA transform in the main loop.
      */
     if (g_ctx && g_sensor_flip_supported) {
         XCamReturn rc = rk_aiq_uapi2_setMirrorFlip(g_ctx,
                                                     (bool)mirror, (bool)flip, 4);
         if (rc == XCAM_RETURN_NO_ERROR) {
-            printf("[ISP] mirror=%d flip=%d applied via sensor (ISP API)\n",
-                   mirror, flip);
+            /* Verify the sensor actually accepted the values */
+            bool rb_mirror = false, rb_flip = false;
+            XCamReturn get_rc = rk_aiq_uapi2_getMirrorFlip(g_ctx, &rb_mirror, &rb_flip);
+            if (get_rc == XCAM_RETURN_NO_ERROR &&
+                (int)rb_mirror == mirror && (int)rb_flip == flip) {
+                printf("[ISP] mirror=%d flip=%d applied via sensor (ISP API, verified)\n",
+                       mirror, flip);
+            } else {
+                printf("[ISP] setMirrorFlip(%d,%d) ISP readback mismatch "
+                       "(got mirror=%d flip=%d), falling back to RGA\n",
+                       mirror, flip, (int)rb_mirror, (int)rb_flip);
+                g_sensor_flip_supported = 0;
+            }
         } else {
             printf("[ISP] setMirrorFlip(%d,%d) ISP err=%d, falling back to RGA\n",
                    mirror, flip, rc);
