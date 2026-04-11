@@ -237,6 +237,17 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* Re-apply saved mirror/flip now that VI channel is ready.
+     * During isp_init() the VI channel didn't exist yet, so the VI API
+     * call failed and the settings were marked for RGA fallback.
+     * Now that the channel is up, give the VI ISP hardware path a chance. */
+    {
+        camera_settings_t boot_cfg;
+        isp_get_settings(&boot_cfg);
+        if (boot_cfg.mirror || boot_cfg.flip)
+            isp_set_mirror_flip(boot_cfg.mirror, boot_cfg.flip);
+    }
+
     /* ── 4. VENC (hardware H.264 encoder — main stream) ───────────────── */
     if (venc_init(VENC_CHN_ID, STREAM_WIDTH, STREAM_HEIGHT,
                   RK_VIDEO_ID_AVC,

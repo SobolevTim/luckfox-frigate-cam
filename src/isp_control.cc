@@ -239,27 +239,16 @@ int isp_init(int cam_id, const char *iq_dir, int width, int height) {
                tnr_rc == XCAM_RETURN_NO_ERROR ? "ok" : "FAILED");
     }
 
-    /* Probe sensor mirror/flip support.
-     * SC3336 exposes V4L2_CID_HFLIP/VFLIP, MIS5001 does not.
-     * A no-op setMirrorFlip(false,false) succeeds on any sensor, so we must
-     * test with an actual change and verify the readback to be sure. */
-    {
-        bool probe_ok = false;
-        XCamReturn mf_rc = rk_aiq_uapi2_setMirrorFlip(g_ctx, true, false, 0);
-        if (mf_rc == XCAM_RETURN_NO_ERROR) {
-            bool rb_mirror = false, rb_flip = false;
-            XCamReturn get_rc = rk_aiq_uapi2_getMirrorFlip(g_ctx, &rb_mirror, &rb_flip);
-            if (get_rc == XCAM_RETURN_NO_ERROR && rb_mirror) {
-                probe_ok = true;
-            }
-            /* Reset to default state regardless */
-            rk_aiq_uapi2_setMirrorFlip(g_ctx, false, false, 0);
-        }
-        g_sensor_flip_supported = probe_ok ? 1 : 0;
-        printf("[ISP] sensor mirror/flip support: %s (probe set_rc=%d)\n",
-               g_sensor_flip_supported ? "YES (ISP API)" : "NO (RGA fallback)",
-               mf_rc);
-    }
+    /* Mirror/flip: no probe at init time.
+     * rk_aiq_uapi2_setMirrorFlip targets sensor V4L2 HFLIP/VFLIP which
+     * MIS5001 does not support — and the rkaiq middleware silently caches
+     * values, making both set+readback return OK even when the sensor
+     * ignores the command.  Instead we use RK_MPI_VI_SetChnMirrorFlip
+     * (ISP output level, works on any sensor) at runtime, with RGA as
+     * the final fallback.  g_sensor_flip_supported stays 0 until the
+     * first successful VI call after vi_chn_init(). */
+    g_sensor_flip_supported = 0;
+    printf("[ISP] mirror/flip: deferred to VI API + RGA fallback\n");
 
     /* Diagnostic: verify AE mode is active */
     {
@@ -410,42 +399,39 @@ int isp_set_mirror_flip(int mirror, int flip) {
     flip   = flip ? 1 : 0;
 
     /*
-     * Try sensor-level mirror/flip first (via rkaiq → V4L2).
-     * SC3336 supports V4L2_CID_HFLIP / V4L2_CID_VFLIP, MIS5001 does not.
-     * When the sensor handles it, the VI output is already flipped and the
-     * RGA capture loop must NOT apply a second transform (skip_frm_cnt=4
-     * tells the ISP to skip 4 frames while the sensor reconfigures).
-     * If the ISP API fails or the readback doesn't match, we fall back to
-     * RGA transform in the main loop.
+     * Try ISP-level mirror/flip via VI channel API.
+     *
+     * rk_aiq_uapi2_setMirrorFlip targets sensor V4L2 HFLIP/VFLIP controls.
+     * Sensors like SC3336 expose them, but MIS5001 does not — and the rkaiq
+     * middleware silently caches values in both set and get, making readback
+     * verification impossible (always returns OK).
+     *
+     * RK_MPI_VI_SetChnMirrorFlip operates at the ISP output level and works
+     * independently of sensor capability — it should succeed on any sensor
+     * connected to the RV1106 ISP.
+     *
+     * If the VI channel is not yet created (called from isp_init before
+     * vi_chn_init), the call will fail and the main loop will apply the
+     * transform via RGA instead.
      */
-    if (g_ctx && g_sensor_flip_supported) {
-        XCamReturn rc = rk_aiq_uapi2_setMirrorFlip(g_ctx,
-                                                    (bool)mirror, (bool)flip, 4);
-        if (rc == XCAM_RETURN_NO_ERROR) {
-            /* Verify the sensor actually accepted the values */
-            bool rb_mirror = false, rb_flip = false;
-            XCamReturn get_rc = rk_aiq_uapi2_getMirrorFlip(g_ctx, &rb_mirror, &rb_flip);
-            if (get_rc == XCAM_RETURN_NO_ERROR &&
-                (int)rb_mirror == mirror && (int)rb_flip == flip) {
-                printf("[ISP] mirror=%d flip=%d applied via sensor (ISP API, verified)\n",
-                       mirror, flip);
-            } else {
-                printf("[ISP] setMirrorFlip(%d,%d) ISP readback mismatch "
-                       "(got mirror=%d flip=%d), falling back to RGA\n",
-                       mirror, flip, (int)rb_mirror, (int)rb_flip);
-                g_sensor_flip_supported = 0;
-            }
+    int hw_applied = 0;
+    {
+        VI_ISP_MIRROR_FLIP_S mf;
+        mf.mirror = (RK_U8)mirror;
+        mf.flip   = (RK_U8)flip;
+        RK_S32 vi_rc = RK_MPI_VI_SetChnMirrorFlip(VI_DEV_ID, VI_CHN_ID, mf);
+        if (vi_rc == RK_SUCCESS) {
+            hw_applied = 1;
+            printf("[ISP] mirror=%d flip=%d applied via VI ISP hardware\n",
+                   mirror, flip);
         } else {
-            printf("[ISP] setMirrorFlip(%d,%d) ISP err=%d, falling back to RGA\n",
-                   mirror, flip, rc);
-            g_sensor_flip_supported = 0; /* downgrade: stop trying ISP path */
+            printf("[ISP] VI SetChnMirrorFlip(%d,%d) rc=0x%x, using RGA fallback\n",
+                   mirror, flip, vi_rc);
         }
-    } else {
-        printf("[ISP] mirror=%d flip=%d (will be applied via RGA)\n",
-               mirror, flip);
     }
 
     pthread_mutex_lock(&g_lock);
+    g_sensor_flip_supported = hw_applied;
     g_cfg.mirror = mirror;
     g_cfg.flip   = flip;
     pthread_mutex_unlock(&g_lock);
