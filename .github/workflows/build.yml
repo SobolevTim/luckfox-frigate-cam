@@ -49,11 +49,23 @@ jobs:
           chmod +x build.sh
           ./build.sh --sensor ${{ matrix.sensor }}
 
+      - name: Package firmware (${{ matrix.sensor }})
+        run: |
+          tar czf "luckfox-camera-rtsp-${{ matrix.sensor }}.tar.gz" -C install/uclibc .
+
+      - name: Verify package contents and executable bit
+        run: |
+          tar tzf "luckfox-camera-rtsp-${{ matrix.sensor }}.tar.gz" | grep -qx 'bin/luckfox_camera_rtsp'
+          tmpdir="$(mktemp -d)"
+          tar xzf "luckfox-camera-rtsp-${{ matrix.sensor }}.tar.gz" -C "$tmpdir"
+          test -x "$tmpdir/bin/luckfox_camera_rtsp"
+          rm -rf "$tmpdir"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ matrix.sensor }}
-          path: install/uclibc/
+          name: release-${{ matrix.sensor }}
+          path: luckfox-camera-rtsp-${{ matrix.sensor }}.tar.gz
           retention-days: 30
 
   # Опционально: создавать Release при push тега v*
@@ -67,16 +79,17 @@ jobs:
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
 
-      - name: Package
+      - name: Verify release files
         run: |
-          for dir in firmware-*; do
-            sensor="${dir#firmware-}"
-            tar czf "luckfox-camera-rtsp-${sensor}.tar.gz" -C "$dir" .
-          done
+          ls -l dist/*.tar.gz
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: "*.tar.gz"
+          files: "dist/*.tar.gz"
           generate_release_notes: true
