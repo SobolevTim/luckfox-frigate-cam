@@ -55,7 +55,7 @@ jobs:
 
       - name: Verify package contents and executable bit
         run: |
-          tar tzf "luckfox-camera-rtsp-${{ matrix.sensor }}.tar.gz" | grep -qx 'bin/luckfox_camera_rtsp'
+          tar tzf "luckfox-camera-rtsp-${{ matrix.sensor }}.tar.gz" | grep -Eq '^(\./)?bin/luckfox_camera_rtsp$'
           tmpdir="$(mktemp -d)"
           tar xzf "luckfox-camera-rtsp-${{ matrix.sensor }}.tar.gz" -C "$tmpdir"
           test -x "$tmpdir/bin/luckfox_camera_rtsp"
