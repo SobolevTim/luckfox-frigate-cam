@@ -104,7 +104,7 @@ Sensor profiles:
 The main stream can be overridden via CMake:
 `-DSTREAM_WIDTH=... -DSTREAM_HEIGHT=... -DSTREAM_FPS=...`
 
-Sub-stream defaults are `640x360 @ 10 fps, 512 kbps` and can be overridden with:
+Sub-stream defaults are `1280x720 @ 10 fps, 512 kbps` and can be overridden with:
 `-DSUB_STREAM_WIDTH=... -DSUB_STREAM_HEIGHT=... -DSUB_STREAM_FPS=... -DSUB_STREAM_BITRATE_KBPS=...`
 
 Audio-related CMake options:
@@ -175,7 +175,7 @@ MQTT_NAME="Luckfox Camera"
 Recommended starting profile:
 
 - Main stream: H.264, `2592x1944`, `25 fps`, `10240 kbps`
-- Sub stream: H.264, `640x360`, `10 fps`, `512 kbps`
+- Sub stream: H.264, `1280x720`, `10 fps`, `512 kbps`
 - Effective `sub_fps` cannot exceed the current main stream FPS
 - GOP is automatically aligned to the active FPS, approximately one I-frame per second
 - With `--audio on`, RTSP audio is exposed only on the main stream
@@ -194,8 +194,8 @@ cameras:
           roles:
             - detect
     detect:
-      width: 640
-      height: 360
+      width: 1280
+      height: 720
       fps: 10
 ```
 

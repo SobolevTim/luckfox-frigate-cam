@@ -99,7 +99,7 @@ chmod +x build.sh
 При необходимости stream можно переопределить вручную через CMake:
 `-DSTREAM_WIDTH=... -DSTREAM_HEIGHT=... -DSTREAM_FPS=...`
 
-Sub stream (по умолчанию `640x360 @ 10fps, 512 kbps`):
+Sub stream (по умолчанию `1280x720 @ 10fps, 512 kbps`):
 `-DSUB_STREAM_WIDTH=... -DSUB_STREAM_HEIGHT=... -DSUB_STREAM_FPS=... -DSUB_STREAM_BITRATE_KBPS=...`
 
 Опции аудио (через CMake):
@@ -172,7 +172,7 @@ MQTT_NAME="Luckfox Camera"
 Рекомендуемые стартовые параметры стрима:
 
 - Main stream: H.264, `2592×1944`, `25 fps`, `10240 kbps`
-- Sub stream: H.264, `640×360`, `10 fps`, `512 kbps` (для Frigate detect)
+- Sub stream: H.264, `1280×720`, `10 fps`, `512 kbps` (для Frigate detect)
 - Эффективный `sub_fps` не может превышать текущий `main fps` (ограничение общего кадропотока)
 - GOP автоматически равен текущему `fps` (то есть примерно 1 секунда между I-frame)
 - при сборке с `--audio on` (🧪): RTSP аудио `G.711A (PCMA)` только в main stream
@@ -191,8 +191,8 @@ cameras:
           roles:
             - detect
     detect:
-      width: 640
-      height: 360
+      width: 1280
+      height: 720
       fps: 10
 ```
 

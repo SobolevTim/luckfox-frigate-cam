@@ -25,7 +25,7 @@ Replace the current manual `VI -> RGA copy/resize -> VENC` approach with a more 
 
 - Add VPSS group and channel initialization for two branches:
   - `VPSS Ch0`: passthrough for the main stream
-  - `VPSS Ch1`: scaling path for the sub stream, `640x360` by default
+  - `VPSS Ch1`: scaling path for the sub stream, `1280x720` by default
 - Bind RK MPI modules:
   - `VI ch0 -> VPSS grp0`
   - `VPSS ch0 -> VENC ch0` for the main stream
@@ -53,7 +53,7 @@ Functional checks:
 - Mirror, flip, and day/night behavior remain correct on both supported sensors
 
 Performance checks:
-- CPU usage drops below the current baseline for a typical `2K main + 640x360 sub` profile
+- CPU usage drops below the current baseline for a typical `2K main + 1280x720 sub` profile
 - Main-stream jitter and frame-time spikes are reduced
 - Dropped frames do not increase when Frigate and VLC are connected at the same time
 

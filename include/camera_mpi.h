@@ -40,10 +40,10 @@ extern "C" {
 
 /* ── Sub stream defaults (compile-time, overridable via CMake) ────────────── */
 #ifndef SUB_STREAM_WIDTH
-#define SUB_STREAM_WIDTH    640
+#define SUB_STREAM_WIDTH    1280
 #endif
 #ifndef SUB_STREAM_HEIGHT
-#define SUB_STREAM_HEIGHT   360
+#define SUB_STREAM_HEIGHT   720
 #endif
 #ifndef SUB_STREAM_FPS
 #define SUB_STREAM_FPS      10

@@ -10,7 +10,7 @@
 ### Что нужно сделать
 - Добавить инициализацию VPSS группы/каналов для двух веток:
   - VPSS Ch0: passthrough для main stream (без масштабирования).
-  - VPSS Ch1: масштабирование для sub stream (640x360 по умолчанию).
+  - VPSS Ch1: масштабирование для sub stream (1280x720 по умолчанию).
 - Выполнить bind модулей в RK MPI:
   - VI ch0 -> VPSS grp0.
   - VPSS ch0 -> VENC ch0 (main).
@@ -38,7 +38,7 @@
   - MQTT-команды fps/bitrate применяются без перезапуска процесса.
   - mirror/flip и day/night работают одинаково на обоих сенсорах.
 - Производительность:
-  - CPU usage ниже текущего baseline на типичном профиле (2K main + 640x360 sub).
+  - CPU usage ниже текущего baseline на типичном профиле (2K main + 1280x720 sub).
   - Снижение jitter/frame-time spikes в main stream.
   - Нет роста dropped frames при одновременных клиентах Frigate + VLC.
 - Надёжность:
