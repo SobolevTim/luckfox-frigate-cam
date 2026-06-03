@@ -248,6 +248,7 @@ mosquitto_pub -h <BROKER_IP> -t luckfox_camera/night_mode/set -m ON
 
 # Базовый day/night (только цвет/серый)
 mosquitto_pub -h <BROKER_IP> -t luckfox_camera/daynight/set -m grayscale
+# Важно: ручной daynight автоматически отключает night_mode
 
 # Баланс белого
 mosquitto_pub -h <BROKER_IP> -t luckfox_camera/wb_preset/set -m daylight
@@ -288,7 +289,7 @@ mosquitto_pub -h <BROKER_IP> -t luckfox_camera/audio_hpf/set -m ON
 | `flip` | `ON` / `OFF` | Переворот |
 | `anti_flicker_en` | `ON` / `OFF` | Антимигание |
 | `anti_flicker_mode` | `50hz` / `auto` | Режим антифликера |
-| `night_mode` | `ON` / `OFF` | Ночной профиль: `ON` = grayscale + `fps=15` + `bitrate=12288`; `OFF` = возврат к дневному профилю |
+| `night_mode` | `ON` / `OFF` | Ночной профиль: `ON` = grayscale + `fps=15` + `bitrate=12288` + адаптивный NR по сенсору; при включенном anti-flicker режим переводится в `auto`; `OFF` = возврат к сохраненному дневному профилю |
 | `bitrate_kbps` | `1000`–`20000` | Битрейт видео |
 | `fps` | `10`–`30` | Частота кадров; GOP автоматически равен `fps` |
 | `sub_fps` | `5`–`30` | Частота кадров sub stream; эффективное значение ограничено текущим `fps` основного stream |

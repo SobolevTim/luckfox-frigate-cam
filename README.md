@@ -251,6 +251,7 @@ mosquitto_pub -h <BROKER_IP> -t luckfox_camera/night_mode/set -m ON
 
 # Toggle grayscale mode directly
 mosquitto_pub -h <BROKER_IP> -t luckfox_camera/daynight/set -m grayscale
+# Note: manual daynight command automatically exits night_mode
 
 # White balance preset
 mosquitto_pub -h <BROKER_IP> -t luckfox_camera/wb_preset/set -m daylight
@@ -282,7 +283,7 @@ All numeric values are validated. Out-of-range or invalid payloads are rejected,
 | `flip` | `ON` / `OFF` | Vertical flip |
 | `anti_flicker_en` | `ON` / `OFF` | Anti-flicker enable |
 | `anti_flicker_mode` | `50hz` / `auto` | Anti-flicker mode |
-| `night_mode` | `ON` / `OFF` | Night profile: grayscale + lower FPS + higher bitrate |
+| `night_mode` | `ON` / `OFF` | Night profile: grayscale + `fps=15` + `bitrate=12288` + sensor-aware NR; when anti-flicker is enabled, mode switches to `auto` |
 | `bitrate_kbps` | `1000`-`20000` | Video bitrate |
 | `fps` | `10`-`30` | Main stream FPS; GOP follows FPS |
 | `sub_fps` | `5`-`30` | Sub-stream FPS; effectively capped by main FPS |

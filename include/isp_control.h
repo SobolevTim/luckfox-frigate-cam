@@ -48,7 +48,7 @@ typedef struct {
     int           flip;              /* 0=off  1=on */
     int           anti_flicker_en;   /* 0=off  1=on */
     int           anti_flicker_mode; /* 0=50 Hz  1=auto */
-        int           bitrate_kbps;      /* encoder CBR bitrate */
+    int           bitrate_kbps;      /* encoder CBR bitrate */
     int           fps;               /* encoder frame-rate  */
     int           sub_bitrate_kbps;  /* sub stream encoder bitrate */
     int           sub_fps;           /* sub stream frame-rate     */
@@ -87,12 +87,12 @@ typedef struct {
 #define ISP_SETTINGS_FILE           "/etc/camera_rtsp.json"
 
 /*
- * Night-mode preset: minimal intervention.
- *
- * The ISP 3A engine (AE, AWB, ANR, TNR, DRC) with the sensor's IQ tuning
- * profile already handles low-light optimisation automatically.
- * Night mode only switches to grayscale and lowers FPS for longer exposure.
- * All other ISP parameters remain at their user-set or IQ-default values.
+ * Night-mode preset:
+ * - grayscale output
+ * - lower FPS for longer exposure
+ * - higher main-stream bitrate for noisy low-light frames
+ * - sensor-aware NR tuning in ISP (applied in isp_control.cc)
+ * - anti-flicker keeps previous enable state, but switches to AUTO when enabled
  */
 #define ISP_NIGHT_FPS                15   /* lower FPS → longer sensor exposure   */
 #define ISP_NIGHT_BITRATE_KBPS    12288   /* more bits for noisy night frames     */
@@ -132,8 +132,7 @@ int  isp_load_settings (const char *filepath);  /* returns 0 if file found */
 /* ── Context accessor (for advanced use) ────────────────────────────────── */
 rk_aiq_sys_ctx_t *isp_get_ctx(void);
 
-/* Returns 1 if the sensor driver supports hardware mirror/flip (via V4L2),
- * 0 if software RGA fallback must be used. Probed once at isp_init(). */
+/* Returns 1 when VI hardware mirror/flip is active; 0 means RGA fallback. */
 int isp_sensor_supports_flip(void);
 
 #ifdef __cplusplus

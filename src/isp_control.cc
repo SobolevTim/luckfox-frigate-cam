@@ -24,6 +24,9 @@ typedef struct {
     int valid;
     int saved_fps;
     int saved_bitrate_kbps;
+    daynight_mode_t saved_daynight;
+    int saved_anti_flicker_en;
+    int saved_anti_flicker_mode;
 } day_hw_profile_t;
 
 static day_hw_profile_t g_day_hw;
@@ -52,6 +55,15 @@ static int xcam_status_to_int(const char *op_name, XCamReturn rc) {
         return -1;
     }
     return 0;
+}
+
+static void xcam_status_warn(const char *op_name, XCamReturn rc) {
+    if (rc != XCAM_RETURN_NO_ERROR)
+        printf("[ISP] WARN: %s err=%d\n", op_name, rc);
+}
+
+static int sensor_profile_is_sc3336(void) {
+    return strcmp(CAMERA_SENSOR_PROFILE, "SC3336") == 0;
 }
 
 static void sanitize_settings(camera_settings_t *cfg) {
@@ -106,19 +118,28 @@ static int cache_day_hw_profile(void) {
     }
     g_day_hw.saved_fps         = g_cfg.fps;
     g_day_hw.saved_bitrate_kbps = g_cfg.bitrate_kbps;
+    g_day_hw.saved_daynight     = g_cfg.daynight;
+    g_day_hw.saved_anti_flicker_en   = g_cfg.anti_flicker_en;
+    g_day_hw.saved_anti_flicker_mode = g_cfg.anti_flicker_mode;
     g_day_hw.valid = 1;
     pthread_mutex_unlock(&g_lock);
 
-    printf("[ISP] cached day profile: fps=%d bitrate=%d\n",
-           g_day_hw.saved_fps, g_day_hw.saved_bitrate_kbps);
+    printf("[ISP] cached day profile: fps=%d bitrate=%d daynight=%d anti_flicker=%d/%d\n",
+           g_day_hw.saved_fps,
+           g_day_hw.saved_bitrate_kbps,
+           (int)g_day_hw.saved_daynight,
+           g_day_hw.saved_anti_flicker_en,
+           g_day_hw.saved_anti_flicker_mode);
     return 0;
 }
 
 /*
- * Night HW profile: do NOT override ANR/TNR/DRC/HLC/AE speed.
- * The ISP 3A engine with the sensor's IQ tuning file already handles
- * low-light NR/exposure.  Manual overrides conflict with it and make
- * the image worse.  We only switch to grayscale and confirm AE AUTO.
+ * Night HW profile: keep AE in AUTO and apply a moderate NR boost.
+ *
+ * Sensor notes:
+ * - MIS5001 at 2K tends to show blotchy chroma/luma noise in twilight,
+ *   so it benefits from stronger NR.
+ * - SC3336 (1080p) generally needs milder NR to preserve moving details.
  */
 static int apply_night_hw_profile(void) {
     if (!g_ctx) return -1;
@@ -128,6 +149,21 @@ static int apply_night_hw_profile(void) {
     /* Ensure AE is in AUTO so the sensor can use longer exposure times */
     ok |= xcam_status_to_int("setExpMode(OP_AUTO)",
                              rk_aiq_uapi2_setExpMode(g_ctx, OP_AUTO));
+
+    /* Switch NR to manual in night mode for reproducible low-light behavior. */
+    xcam_status_warn("setNRMode(OP_MANUAL)",
+                     rk_aiq_uapi2_setNRMode(g_ctx, OP_MANUAL));
+
+    const unsigned int spatial_nr  = sensor_profile_is_sc3336() ? 66U : 78U;
+    const unsigned int temporal_nr = sensor_profile_is_sc3336() ? 58U : 72U;
+
+    xcam_status_warn("setMSpaNRStrth(on=1)",
+                     rk_aiq_uapi2_setMSpaNRStrth(g_ctx, true, spatial_nr));
+    xcam_status_warn("setMTNRStrth(on=1)",
+                     rk_aiq_uapi2_setMTNRStrth(g_ctx, true, temporal_nr));
+
+    printf("[ISP] night NR profile: sensor=%s spa=%u tnr=%u\n",
+           CAMERA_SENSOR_PROFILE, spatial_nr, temporal_nr);
 
     return ok;
 }
@@ -145,6 +181,14 @@ static int restore_day_hw_profile(void) {
      * otherwise AWB can get stuck with wrong colour matrix (purple tint). */
     ok |= xcam_status_to_int("setWBMode(OP_AUTO)",
                              rk_aiq_uapi2_setWBMode(g_ctx, OP_AUTO));
+
+    /* Return NR control to IQ auto profile for daylight scenes. */
+    xcam_status_warn("setNRMode(OP_AUTO)",
+                     rk_aiq_uapi2_setNRMode(g_ctx, OP_AUTO));
+    xcam_status_warn("setMSpaNRStrth(on=0)",
+                     rk_aiq_uapi2_setMSpaNRStrth(g_ctx, false, 0));
+    xcam_status_warn("setMTNRStrth(on=0)",
+                     rk_aiq_uapi2_setMTNRStrth(g_ctx, false, 0));
 
     pthread_mutex_lock(&g_lock);
     memset(&g_day_hw, 0, sizeof(g_day_hw));
@@ -227,16 +271,15 @@ int isp_init(int cam_id, const char *iq_dir, int width, int height) {
                wb_rc == XCAM_RETURN_NO_ERROR ? "ok" : "FAILED");
     }
 
-    /* Force TNR (Temporal Noise Reduction) OFF.
-     * The IQ profile auto-enables TNR in low light which causes ghosting
-     * on moving objects — they leave semi-transparent trails and blend with
-     * the background, making motion detection impossible.
-     * For a surveillance camera, sharp moving objects are more important
-     * than smooth noise.  setMTNRStrth(true, 0) = manual override to zero. */
+    /* Keep default daylight behavior in IQ auto mode.
+     * We only switch to manual NR while night_mode is ON. */
     {
-        XCamReturn tnr_rc = rk_aiq_uapi2_setMTNRStrth(g_ctx, true, 0);
-        printf("[ISP] force TNR → OFF: %s\n",
-               tnr_rc == XCAM_RETURN_NO_ERROR ? "ok" : "FAILED");
+        xcam_status_warn("setNRMode(OP_AUTO)",
+                         rk_aiq_uapi2_setNRMode(g_ctx, OP_AUTO));
+        xcam_status_warn("setMSpaNRStrth(on=0)",
+                         rk_aiq_uapi2_setMSpaNRStrth(g_ctx, false, 0));
+        xcam_status_warn("setMTNRStrth(on=0)",
+                         rk_aiq_uapi2_setMTNRStrth(g_ctx, false, 0));
     }
 
     /* Mirror/flip: no probe at init time.
@@ -507,28 +550,50 @@ int isp_set_night_mode(int enabled) {
     enabled = enabled ? 1 : 0;
     int ok = 0;
 
+    pthread_mutex_lock(&g_lock);
+    int was_enabled = g_cfg.night_mode;
+    pthread_mutex_unlock(&g_lock);
+
+    if (enabled == was_enabled) {
+        printf("[ISP] night_mode already %s\n", enabled ? "ON" : "OFF");
+        return 0;
+    }
+
     if (enabled)
         cache_day_hw_profile();
 
     if (enabled) {
-        /* Night mode: switch to grayscale and lower FPS for longer exposure.
-         * Do NOT override brightness/contrast/sharpness/NR/DRC/HLC — the ISP
-         * 3A engine with the sensor IQ tuning profile already handles
-         * low-light optimisation.  Manual overrides conflict with it. */
+        pthread_mutex_lock(&g_lock);
+        int saved_af_en = g_day_hw.valid ? g_day_hw.saved_anti_flicker_en : g_cfg.anti_flicker_en;
+        int saved_af_mode = g_day_hw.valid ? g_day_hw.saved_anti_flicker_mode : g_cfg.anti_flicker_mode;
+        pthread_mutex_unlock(&g_lock);
+
+        /* Night mode:
+         * - switch to grayscale,
+         * - lower FPS for longer exposure,
+         * - apply a sensor-aware NR profile,
+         * - if anti-flicker is enabled, force AUTO mode to reduce flicker
+         *   while preserving exposure flexibility in mixed lighting. */
         ok |= isp_set_daynight    (DAYNIGHT_GRAY);
         ok |= isp_set_fps         (ISP_NIGHT_FPS);
         ok |= isp_set_bitrate_kbps(ISP_NIGHT_BITRATE_KBPS);
+        ok |= isp_set_anti_flicker(saved_af_en,
+                                   saved_af_en ? 1 : saved_af_mode);
         ok |= apply_night_hw_profile();
     } else {
         /* Day restore: read cached values, then reset HW, then restore FPS.
          * Must read g_day_hw BEFORE restore_day_hw_profile clears it. */
         pthread_mutex_lock(&g_lock);
-        int day_fps     = g_day_hw.valid ? g_day_hw.saved_fps          : ISP_DEFAULT_FPS;
-        int day_bitrate = g_day_hw.valid ? g_day_hw.saved_bitrate_kbps : ISP_DEFAULT_BITRATE_KBPS;
+        int day_fps         = g_day_hw.valid ? g_day_hw.saved_fps             : ISP_DEFAULT_FPS;
+        int day_bitrate     = g_day_hw.valid ? g_day_hw.saved_bitrate_kbps    : ISP_DEFAULT_BITRATE_KBPS;
+        int day_daynight    = g_day_hw.valid ? (int)g_day_hw.saved_daynight   : (int)DAYNIGHT_COLOR;
+        int day_af_en       = g_day_hw.valid ? g_day_hw.saved_anti_flicker_en : 1;
+        int day_af_mode     = g_day_hw.valid ? g_day_hw.saved_anti_flicker_mode : 0;
         pthread_mutex_unlock(&g_lock);
 
-        ok |= isp_set_daynight    (DAYNIGHT_COLOR);
+        ok |= isp_set_daynight    ((daynight_mode_t)day_daynight);
         ok |= restore_day_hw_profile();
+        ok |= isp_set_anti_flicker(day_af_en, day_af_mode);
         ok |= isp_set_fps         (day_fps);
         ok |= isp_set_bitrate_kbps(day_bitrate);
     }

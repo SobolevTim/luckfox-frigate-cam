@@ -122,13 +122,16 @@ Examples:
 - `sub_fps`: integer range `5..30` (effective stream output is capped by current main `fps`)
 - `mirror`, `flip`, `anti_flicker_en`: `ON/OFF` or `1/0`
 - `daynight`: `color` or `grayscale`
+  - manual `daynight` command automatically exits `night_mode` to keep state consistent.
 - `anti_flicker_mode`: `50hz` or `auto`
 - `night_mode`: `ON` or `OFF`
   - `ON`: applies low-light ISP profile:
     - grayscale,
     - main stream `fps=15`, `bitrate_kbps=12288`,
-    - AE mode forced to AUTO.
-  - `OFF`: restores day profile (cached `fps`/`bitrate`), switches back to color and re-applies safe day HW profile (AE/AWB AUTO).
+    - AE mode forced to AUTO,
+    - sensor-aware NR profile (`MIS5001`: stronger NR, `SC3336`: milder NR),
+    - when anti-flicker is enabled, mode is switched to `auto` for night.
+  - `OFF`: restores cached day profile (`fps`, `bitrate`, `daynight`, anti-flicker), then returns ISP HW profile to day-safe AUTO (AE/AWB/NR).
 - `wb_preset`: one of named presets or integer `0..7`
 
 Each command publishes `<node_id>/ack` with status `ok` or `error`.

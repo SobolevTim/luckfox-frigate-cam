@@ -1388,14 +1388,30 @@ static void dispatch_command(const char *topic,
 
     /* ── String / enum params ────────────────────────────────────────────── */
     else if (!strcmp(param, "daynight")) {
+        daynight_mode_t requested_mode;
         if (!strcmp(val, "grayscale") || !strcmp(val, "1")) {
-            next.daynight = DAYNIGHT_GRAY;
+            requested_mode = DAYNIGHT_GRAY;
         } else if (!strcmp(val, "color") || !strcmp(val, "0")) {
-            next.daynight = DAYNIGHT_COLOR;
+            requested_mode = DAYNIGHT_COLOR;
         } else {
             publish_ack(param, "error", "daynight_expected_color_or_grayscale");
             return;
         }
+
+        /* Manual day/night command takes precedence over preset night mode.
+         * Exit night mode first so state does not remain logically inconsistent
+         * (e.g. night_mode=ON while color/grayscale is controlled manually). */
+        if (prev.night_mode) {
+            if (isp_set_night_mode(0) != 0) {
+                publish_ack(param, "error", "night_mode_exit_failed");
+                mqtt_publish_state();
+                return;
+            }
+            isp_get_settings(&prev);
+            next = prev;
+        }
+
+        next.daynight = requested_mode;
     }
     else if (!strcmp(param, "wb_preset")) {
         int found = 0;
