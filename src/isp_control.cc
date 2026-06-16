@@ -610,9 +610,9 @@ int isp_set_night_mode(int enabled) {
 
 void isp_get_settings(camera_settings_t *out) {
     pthread_mutex_lock(&g_lock);
-    sanitize_settings(&g_cfg);
     *out = g_cfg;
     pthread_mutex_unlock(&g_lock);
+    sanitize_settings(out); /* sanitize the copy — do NOT mutate g_cfg here */
 }
 
 int isp_apply_settings(const camera_settings_t *s) {
@@ -631,16 +631,37 @@ int isp_apply_settings(const camera_settings_t *s) {
     ok |= isp_set_anti_flicker(sanitized.anti_flicker_en, sanitized.anti_flicker_mode);
 
     pthread_mutex_lock(&g_lock);
-    g_cfg.bitrate_kbps = sanitized.bitrate_kbps;
-    g_cfg.fps          = sanitized.fps;
+    g_cfg.bitrate_kbps     = sanitized.bitrate_kbps;
+    g_cfg.fps              = sanitized.fps;
     g_cfg.sub_bitrate_kbps = sanitized.sub_bitrate_kbps;
     g_cfg.sub_fps          = sanitized.sub_fps;
     g_cfg.night_mode       = sanitized.night_mode;
     pthread_mutex_unlock(&g_lock);
 
-    /* If night mode was persisted, re-apply the night preset on top */
-    if (sanitized.night_mode)
-        isp_set_night_mode(1);
+    if (sanitized.night_mode) {
+        /* Pre-populate g_day_hw with defaults so that a subsequent
+         * night→day transition restores sensible values.  The saved
+         * fps/bitrate are the night-mode values; the original pre-night
+         * values are not separately persisted, so we fall back to defaults. */
+        pthread_mutex_lock(&g_lock);
+        if (!g_day_hw.valid) {
+            g_day_hw.saved_fps               = ISP_DEFAULT_FPS;
+            g_day_hw.saved_bitrate_kbps      = ISP_DEFAULT_BITRATE_KBPS;
+            g_day_hw.saved_daynight          = DAYNIGHT_COLOR;
+            g_day_hw.saved_anti_flicker_en   = sanitized.anti_flicker_en;
+            g_day_hw.saved_anti_flicker_mode = sanitized.anti_flicker_mode;
+            g_day_hw.valid = 1;
+        }
+        pthread_mutex_unlock(&g_lock);
+
+        /* Apply the night HW profile (NR tuning) directly.
+         * isp_set_night_mode(1) cannot be used here: g_cfg.night_mode is
+         * already 1 (set above), which triggers the "already ON" early-exit
+         * guard inside isp_set_night_mode and silently skips
+         * apply_night_hw_profile().  Calling it directly ensures the NR
+         * preset is applied correctly on every boot with saved night_mode=1. */
+        apply_night_hw_profile();
+    }
 
     return ok;
 }

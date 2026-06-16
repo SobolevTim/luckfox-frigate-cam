@@ -74,9 +74,13 @@ int vi_chn_init(int dev_id, int chn_id, int width, int height) {
     attr.u32Depth               = 2;
 
     int ret = RK_MPI_VI_SetChnAttr(dev_id, chn_id, &attr);
-    ret    |= RK_MPI_VI_EnableChn(dev_id, chn_id);
-    if (ret) {
-        printf("[VI] channel init failed: %d\n", ret);
+    if (ret != RK_SUCCESS) {
+        printf("[VI] SetChnAttr failed: 0x%x\n", ret);
+        return -1;
+    }
+    ret = RK_MPI_VI_EnableChn(dev_id, chn_id);
+    if (ret != RK_SUCCESS) {
+        printf("[VI] EnableChn failed: 0x%x\n", ret);
         return -1;
     }
     printf("[VI] channel %d/%d → %dx%d NV12\n", dev_id, chn_id, width, height);

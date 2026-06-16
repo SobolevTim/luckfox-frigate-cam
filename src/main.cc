@@ -50,6 +50,10 @@
 #define APP_HEARTBEAT_FILE "/tmp/camera_rtsp/heartbeat"
 #define APP_HEARTBEAT_DIR  "/tmp/camera_rtsp"
 
+/* Maximum VENC output packs per GetStream call — guards against heap overflow
+ * when the encoder returns multiple NAL units (e.g. SPS+PPS+IDR on an I-frame). */
+#define MAX_VENC_PACKS   4
+
 /* Maximum consecutive VI errors before logging a warning */
 #define MAX_VI_ERRORS    10
 #define MAX_VENC_SEND_ERRORS 10
@@ -127,7 +131,9 @@ static void sig_handler(int signo) {
 int main(int argc, char *argv[]) {
     /* Stop the default Luckfox camera daemon so it doesn't claim the sensor */
     if (!env_flag_enabled("LUCKFOX_SKIP_RKLUNCH_STOP")) {
-        system("RkLunch-stop.sh");
+        /* Use absolute path — systemd environments often run with a stripped
+         * PATH that doesn't include the script's directory. */
+        (void)system("/usr/bin/RkLunch-stop.sh 2>/dev/null");
         sleep(1); /* give the daemon time to release resources */
     }
 
@@ -232,6 +238,7 @@ int main(int argc, char *argv[]) {
     }
     if (vi_chn_init(VI_DEV_ID, VI_CHN_ID, STREAM_WIDTH, STREAM_HEIGHT) != 0) {
         fprintf(stderr, "[MAIN] VI channel init failed\n");
+        RK_MPI_VI_DisableDev(VI_DEV_ID); /* undo vi_dev_init so the sensor is released */
         RK_MPI_SYS_Exit();
         isp_stop();
         return 1;
@@ -524,13 +531,13 @@ int main(int argc, char *argv[]) {
 
     memset(&venc_stream, 0, sizeof(venc_stream));
     memset(&sub_venc_stream, 0, sizeof(sub_venc_stream)); /* zero before any goto cleanup */
-    venc_stream.pstPack = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S));
+    venc_stream.pstPack = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S) * MAX_VENC_PACKS);
     if (!venc_stream.pstPack) {
         fprintf(stderr, "[MAIN] malloc venc pack failed\n");
         goto cleanup;
     }
 
-    sub_venc_stream.pstPack = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S));
+    sub_venc_stream.pstPack = (VENC_PACK_S *)malloc(sizeof(VENC_PACK_S) * MAX_VENC_PACKS);
     if (!sub_venc_stream.pstPack) {
         fprintf(stderr, "[MAIN] malloc sub venc pack failed\n");
         free(venc_stream.pstPack);
@@ -627,16 +634,19 @@ int main(int argc, char *argv[]) {
         last_main_stream_ok_ts = time(NULL);
 
         stats_frames_window++;
-        stats_bytes_window += (unsigned long long)venc_stream.pstPack->u32Len;
+        for (RK_U32 pi = 0; pi < venc_stream.u32PackCount; pi++)
+            stats_bytes_window += (unsigned long long)venc_stream.pstPack[pi].u32Len;
 
         /* 8.7 Transmit main stream over RTSP */
         if (rtsp_handle && rtsp_session) {
-            void *pData = RK_MPI_MB_Handle2VirAddr(venc_stream.pstPack->pMbBlk);
-            rtsp_tx_video(rtsp_session,
-                          (uint8_t *)pData,
-                          venc_stream.pstPack->u32Len,
-                          venc_stream.pstPack->u64PTS);
-
+            for (RK_U32 pi = 0; pi < venc_stream.u32PackCount; pi++) {
+                void *pData = RK_MPI_MB_Handle2VirAddr(venc_stream.pstPack[pi].pMbBlk);
+                if (pData)
+                    rtsp_tx_video(rtsp_session,
+                                  (uint8_t *)pData,
+                                  venc_stream.pstPack[pi].u32Len,
+                                  venc_stream.pstPack[pi].u64PTS);
+            }
 #if ENABLE_AUDIO_STREAM
             if (audio_enabled) {
                 (void)audio_rtsp_send_pending(&audio_ctx, rtsp_session, 8);
@@ -674,14 +684,18 @@ int main(int argc, char *argv[]) {
                                                     SUB_VENC_GET_TIMEOUT_MS);
                         if (ret == RK_SUCCESS) {
                             sub_stats_frames_window++;
-                            sub_stats_bytes_window += (unsigned long long)sub_venc_stream.pstPack->u32Len;
+                            for (RK_U32 pi = 0; pi < sub_venc_stream.u32PackCount; pi++)
+                                sub_stats_bytes_window += (unsigned long long)sub_venc_stream.pstPack[pi].u32Len;
 
                             if (rtsp_handle && rtsp_sub_session) {
-                                void *pSubData = RK_MPI_MB_Handle2VirAddr(sub_venc_stream.pstPack->pMbBlk);
-                                rtsp_tx_video(rtsp_sub_session,
-                                              (uint8_t *)pSubData,
-                                              sub_venc_stream.pstPack->u32Len,
-                                              sub_venc_stream.pstPack->u64PTS);
+                                for (RK_U32 pi = 0; pi < sub_venc_stream.u32PackCount; pi++) {
+                                    void *pSubData = RK_MPI_MB_Handle2VirAddr(sub_venc_stream.pstPack[pi].pMbBlk);
+                                    if (pSubData)
+                                        rtsp_tx_video(rtsp_sub_session,
+                                                      (uint8_t *)pSubData,
+                                                      sub_venc_stream.pstPack[pi].u32Len,
+                                                      sub_venc_stream.pstPack[pi].u64PTS);
+                                }
                             }
                             RK_MPI_VENC_ReleaseStream(VENC_SUB_CHN_ID, &sub_venc_stream);
                         } else {

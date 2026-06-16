@@ -353,3 +353,18 @@ Example automations are available in [`ha_integration/configuration.yaml`](ha_in
 - The current implementation is focused on stable RTSP streaming and robust MQTT-based control.
 - Audio remains experimental.
 - The forward-looking roadmap is documented in [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md).
+
+---
+
+## Changelog
+
+### v0.2.1
+- **Fix:** Night-mode NR hardware profile (noise reduction tuning) was not applied after a reboot when `night_mode=ON` was saved to `/etc/camera_rtsp.json`.  `isp_apply_settings` now calls `apply_night_hw_profile()` directly, bypassing the early-exit guard in `isp_set_night_mode` that was silently skipping the apply.
+- **Fix:** When rebooting with saved `night_mode=ON`, the day-profile cache (`g_day_hw`) was never populated, so switching night→day reset fps and bitrate to hardcoded defaults instead of reasonable values.  The cache is now pre-seeded with defaults on startup.
+- **Fix:** `vi_chn_init` was OR-ing return values from `SetChnAttr` and `EnableChn`, causing `EnableChn` to run on an unconfigured channel when `SetChnAttr` failed.  Each call is now checked separately.
+- **Fix:** LWT Will message upgraded from QoS-0 to QoS-1 so that an unclean disconnect reliably delivers `availability=offline` to the broker even over lossy links.
+- **Fix:** VENC output pack buffer enlarged from 1 to `MAX_VENC_PACKS=4` entries; transmit loop now iterates over all returned packs, preventing a heap overflow on multi-NAL frames (SPS+PPS+IDR).
+- **Fix:** `isp_get_settings` no longer silently mutates `g_cfg` via `sanitize_settings`; sanitization now applies to the returned copy only.
+- **Fix:** `RkLunch-stop.sh` now invoked via absolute path `/usr/bin/RkLunch-stop.sh` to avoid `$PATH`-dependent failures in systemd environments.
+- **Fix:** VI device is now properly disabled (`RK_MPI_VI_DisableDev`) when `vi_chn_init` fails, releasing the sensor for subsequent restart attempts.
+- **Fix:** HA birth-message detection changed from `pay_len >= 6` to `pay_len == 6` so only an exact `"online"` payload triggers discovery republish.

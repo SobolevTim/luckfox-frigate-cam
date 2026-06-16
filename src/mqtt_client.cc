@@ -262,7 +262,7 @@ static int build_connect(uint8_t *buf, size_t bufsz)
     int has_will = 1;          /* always set LWT */
     int has_user = (g_cfg.username[0] != '\0');
     int has_pass = (has_user && g_cfg.password[0] != '\0');
-    if (has_will) flags |= (0x04 | 0x20); /* will flag + will retain */
+    if (has_will) flags |= (0x04 | 0x08 | 0x20); /* will flag + QoS-1 + will retain */
     if (has_user) flags |= 0x80;
     if (has_pass) flags |= 0x40;
     pl[pi++] = flags;
@@ -1702,7 +1702,7 @@ static int process_one_packet(void)
          * configs so HA re-creates any entities it lost after restart.
          */
         if (strcmp(topic, "homeassistant/status") == 0 &&
-            pay_len >= 6 &&
+            pay_len == 6 &&
             memcmp(buf + ti, "online", 6) == 0)
         {
             printf("[MQTT] HA came online — republishing discovery\n");
