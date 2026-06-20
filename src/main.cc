@@ -300,7 +300,10 @@ int main(int argc, char *argv[]) {
     MB_POOL_CONFIG_S pool_cfg;
     memset(&pool_cfg, 0, sizeof(pool_cfg));
     pool_cfg.u64MBSize   = (RK_U64)(STREAM_WIDTH * STREAM_HEIGHT * 3 / 2);
-    pool_cfg.u32MBCnt    = 2;  /* double-buffer */
+    /* Single block: the synchronous capture loop allocates exactly one MB
+     * (mb_blk below) and reuses it every frame. A 2nd block was never used
+     * and wasted ~7.5 MB of CMA on the 2592x1944 main stream. */
+    pool_cfg.u32MBCnt    = 1;
     pool_cfg.enAllocType = MB_ALLOC_TYPE_DMA;
     MB_POOL mb_pool = RK_MPI_MB_CreatePool(&pool_cfg);
     if (mb_pool == MB_INVALID_POOLID) {
@@ -344,7 +347,7 @@ int main(int argc, char *argv[]) {
     MB_POOL_CONFIG_S sub_pool_cfg;
     memset(&sub_pool_cfg, 0, sizeof(sub_pool_cfg));
     sub_pool_cfg.u64MBSize   = (RK_U64)(SUB_STREAM_WIDTH * SUB_STREAM_HEIGHT * 3 / 2);
-    sub_pool_cfg.u32MBCnt    = 2;
+    sub_pool_cfg.u32MBCnt    = 1;  /* single reused block, see main pool above */
     sub_pool_cfg.enAllocType = MB_ALLOC_TYPE_DMA;
     MB_POOL sub_mb_pool = RK_MPI_MB_CreatePool(&sub_pool_cfg);
     if (sub_mb_pool == MB_INVALID_POOLID) {

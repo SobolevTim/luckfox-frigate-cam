@@ -133,7 +133,12 @@ int venc_init(int chn_id, int width, int height,
     attr.stVencAttr.u32MaxPicHeight  = (RK_U32)height;  /* must be >= u32PicHeight */
     attr.stVencAttr.enPixelFormat    = RK_FMT_YUV420SP; /* same as VI — no conversion */
     attr.stVencAttr.enMirror         = MIRROR_NONE;
-    attr.stVencAttr.u32BufSize       = (RK_U32)(width * height * 3 / 2);
+    /* Encoded-bitstream output buffer. Full raw-frame size (w*h*3/2) is
+     * wasteful — a compressed H.264/H.265 frame is far smaller. w*h gives a
+     * generous margin even for large I-frames while saving CMA, which on this
+     * board is only 66 MB total and is otherwise exhausted by the dual-stream
+     * pipeline (dmesg: rk-dma-heap-cma alloc failed, ret -12). */
+    attr.stVencAttr.u32BufSize       = (RK_U32)(width * height);
     if (type == RK_VIDEO_ID_AVC)
         attr.stVencAttr.u32Profile   = H264E_PROFILE_HIGH;
     attr.stVencAttr.bByFrame         = RK_TRUE;   /* deliver complete frames */
@@ -141,7 +146,12 @@ int venc_init(int chn_id, int width, int height,
     attr.stVencAttr.u32PicHeight     = (RK_U32)height;
     attr.stVencAttr.u32VirWidth      = (RK_U32)width;
     attr.stVencAttr.u32VirHeight     = (RK_U32)height;
-    attr.stVencAttr.u32StreamBufCnt  = 4;
+    /* Output bitstream buffers. 2 is enough for our synchronous
+     * SendFrame→GetStream→ReleaseStream loop and matches Rockchip's
+     * stock configs. Each buffer is u32BufSize (full-frame) of CMA, so
+     * 4 here wastes ~15 MB on the 2592x1944 main stream and can exhaust
+     * the DMA/CMA heap (RTAllocatorDma "failed to alloc handle"). */
+    attr.stVencAttr.u32StreamBufCnt  = 2;
 
     int ret = RK_MPI_VENC_CreateChn(chn_id, &attr);
     if (ret != RK_SUCCESS) {
