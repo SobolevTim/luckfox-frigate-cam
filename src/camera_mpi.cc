@@ -128,17 +128,20 @@ int venc_init(int chn_id, int width, int height,
     }
 
     /* Encoder attributes */
-    attr.stVencAttr.enType          = type;
-    attr.stVencAttr.enPixelFormat   = RK_FMT_YUV420SP; /* same as VI — no conversion */
+    attr.stVencAttr.enType           = type;
+    attr.stVencAttr.u32MaxPicWidth   = (RK_U32)width;   /* must be >= u32PicWidth */
+    attr.stVencAttr.u32MaxPicHeight  = (RK_U32)height;  /* must be >= u32PicHeight */
+    attr.stVencAttr.enPixelFormat    = RK_FMT_YUV420SP; /* same as VI — no conversion */
+    attr.stVencAttr.enMirror         = MIRROR_NONE;
+    attr.stVencAttr.u32BufSize       = (RK_U32)(width * height * 3 / 2);
     if (type == RK_VIDEO_ID_AVC)
-        attr.stVencAttr.u32Profile  = H264E_PROFILE_HIGH;
-    attr.stVencAttr.u32PicWidth     = (RK_U32)width;
-    attr.stVencAttr.u32PicHeight    = (RK_U32)height;
-    attr.stVencAttr.u32VirWidth     = (RK_U32)width;
-    attr.stVencAttr.u32VirHeight    = (RK_U32)height;
-    attr.stVencAttr.u32StreamBufCnt = 4;  /* extra output buffers for stability */
-    attr.stVencAttr.u32BufSize      = (RK_U32)(width * height * 3 / 2);
-    attr.stVencAttr.enMirror        = MIRROR_NONE;
+        attr.stVencAttr.u32Profile   = H264E_PROFILE_HIGH;
+    attr.stVencAttr.bByFrame         = RK_TRUE;   /* deliver complete frames */
+    attr.stVencAttr.u32PicWidth      = (RK_U32)width;
+    attr.stVencAttr.u32PicHeight     = (RK_U32)height;
+    attr.stVencAttr.u32VirWidth      = (RK_U32)width;
+    attr.stVencAttr.u32VirHeight     = (RK_U32)height;
+    attr.stVencAttr.u32StreamBufCnt  = 4;
 
     int ret = RK_MPI_VENC_CreateChn(chn_id, &attr);
     if (ret != RK_SUCCESS) {

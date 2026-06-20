@@ -395,7 +395,10 @@ if [ ! -d "$LIB_DIR" ]; then
     exit 1
 fi
 
-export LD_LIBRARY_PATH="$LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# System /usr/lib goes first so the running firmware's rockit/mpp libraries
+# (which match the kernel modules) take priority over our bundled SDK copies.
+# Our bundled libs serve as fallback for rtsp/sample_comm not present in /usr/lib.
+export LD_LIBRARY_PATH="/usr/lib:$LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 log "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 
 export rt_log_level="$RT_LOG_LEVEL"
